@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# reroll-data crawl output
+/data/
+*.db
+*.db-wal
+*.db-shm
+
+.DS_Store

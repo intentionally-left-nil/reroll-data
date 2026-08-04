@@ -1,16 +1,22 @@
 [project]
 name = "reroll-data"
 version = "0.1.0"
-description = "Add your description here"
+description = "Static pypi data for determining reroll compatibility percentages with real packages"
 readme = "README.md"
 authors = [
-    { name = "Anil Kulkarni" }
+    { name = "Anil Kulkarni", email = "akulkarni@anaconda.com" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "pypi-simple>=1.8",
+    # Imported directly (crawl.py, metadata.py) rather than only reached through
+    # pypi-simple, so declared here instead of relied on transitively.
+    "requests>=2.32",
+    "urllib3>=2.0",
+]
 
 [project.scripts]
-reroll-data = "reroll_data:main"
+reroll-data = "reroll_data.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.0,<0.13.0"]
