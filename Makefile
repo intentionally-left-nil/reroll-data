@@ -6,12 +6,23 @@ WORKERS ?= 12
 # small scale before being let loose on the full corpus.
 LIMIT   ?=
 
+# Diagnostics (see reroll_data.investigate). PWORKERS is separate from WORKERS
+# because they mean opposite things: WORKERS is politeness towards PyPI, while
+# PWORKERS is local parallelism. 1 is right for a filename-only probe.
+PROBE    ?= filename
+OUT      ?= failures.csv
+PACKAGE  ?=
+PWORKERS ?= 1
+
 RUN        := uv run reroll-data --db $(DB)
+INVESTIGATE := uv run reroll-investigate --db $(DB)
 LIMIT_FLAG  = $(if $(LIMIT),--limit $(LIMIT),)
+PKG_FLAG    = $(if $(PACKAGE),--package $(PACKAGE),)
 
 .PHONY: help status \
 	refresh crawl sync-filenames \
-	metadata-status metadata-sync metadata-fetch sync-metadata
+	metadata-status metadata-sync metadata-fetch sync-metadata \
+	investigate sync-probe
 
 help:
 	@echo "Targets (override DB, RATE, WORKERS, LIMIT as needed):"
@@ -21,6 +32,11 @@ help:
 	@echo "  metadata-status   counts for the metadata download"
 	@echo
 	@echo "Finer-grained steps: refresh, crawl, metadata-sync, metadata-fetch"
+	@echo
+	@echo "Diagnostics (override PROBE, OUT, PACKAGE, LIMIT, PWORKERS):"
+	@echo "  probes:           $(shell ls probes/*.py 2>/dev/null | xargs -n1 basename | sed 's/\.py$$//' | tr '\n' ' ')"
+	@echo "  investigate       probe every wheel, write $(OUT)"
+	@echo "  sync-probe        reinstall ../reroll (only needed if its deps changed)"
 
 status:
 	$(RUN) status
@@ -61,3 +77,16 @@ metadata-fetch:
 sync-metadata:
 	$(RUN) metadata sync
 	$(RUN) metadata fetch --rate $(RATE) --workers $(WORKERS) $(LIMIT_FLAG)
+
+# --------------------------------------------------------------------------- #
+# diagnostics: run a probe over the corpus (see reroll_data.investigate)
+# --------------------------------------------------------------------------- #
+
+investigate:
+	$(INVESTIGATE) --probe $(PROBE) -o $(OUT) --workers $(PWORKERS) \
+		$(LIMIT_FLAG) $(PKG_FLAG)
+
+# ../reroll is installed editable, so ordinary source edits need nothing. This
+# is only for when reroll's own dependencies change.
+sync-probe:
+	uv sync --group probe

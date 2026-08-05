@@ -15,7 +15,10 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-DEFAULT_DB = Path("data/pypi-wheels.db")
+# The corpus the crawl actually populates, so bare `reroll-data` and
+# `reroll-investigate` invocations agree with the Makefile instead of pointing
+# at a path that has never existed.
+DEFAULT_DB = Path("data/v.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (

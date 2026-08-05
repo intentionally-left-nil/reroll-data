@@ -223,6 +223,29 @@ wheels = [
 ]
 
 [[package]]
+name = "reroll"
+version = "0.1.0"
+source = { editable = "../reroll" }
+dependencies = [
+    { name = "packaging" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "packaging", specifier = ">=26.1" },
+    { name = "pydantic", specifier = ">=2.13.4" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "pytest-cov", specifier = ">=6.0" },
+    { name = "ruff", specifier = ">=0.8" },
+    { name = "ty", specifier = ">=0.0.1a1" },
+]
+
+[[package]]
 name = "reroll-data"
 version = "0.1.0"
 source = { editable = "." }
@@ -232,12 +255,20 @@ dependencies = [
     { name = "urllib3" },
 ]
 
+[package.dev-dependencies]
+probe = [
+    { name = "reroll" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "pypi-simple", specifier = ">=1.8" },
     { name = "requests", specifier = ">=2.32" },
     { name = "urllib3", specifier = ">=2.0" },
 ]
+
+[package.metadata.requires-dev]
+probe = [{ name = "reroll", editable = "../reroll" }]
 
 [[package]]
 name = "soupsieve"

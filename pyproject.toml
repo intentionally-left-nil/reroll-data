@@ -17,6 +17,26 @@ dependencies = [
 
 [project.scripts]
 reroll-data = "reroll_data.cli:main"
+reroll-investigate = "reroll_data.investigate:main"
+
+# reroll is the thing under test, not a runtime dependency of the scraper: the
+# crawl half of this repo must stay installable without it. Kept in a group so
+# `reroll-data` and `reroll-investigate` can share one environment anyway --
+# reroll needs packaging+pydantic, this repo needs pypi-simple+requests, and
+# neither constrains the other.
+[dependency-groups]
+probe = ["reroll"]
+
+[tool.uv.sources]
+# Editable, so edits to ../reroll are picked up by the next `reroll-investigate`
+# run with no reinstall. Only a change to *reroll's own dependencies* needs
+# `make sync-probe`. The path assumes reroll is checked out beside this repo;
+# point --python at another environment if it lives elsewhere.
+reroll = { path = "../reroll", editable = true }
+
+# Included in the default sync so `uv run reroll-investigate` just works.
+[tool.uv]
+default-groups = ["probe"]
 
 [build-system]
 requires = ["uv_build>=0.12.0,<0.13.0"]

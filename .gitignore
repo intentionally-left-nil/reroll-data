@@ -223,4 +223,9 @@ __marimo__/
 *.db-wal
 *.db-shm
 
+# reroll-investigate output: results describe a corpus and a reroll revision,
+# not the source, and failures.csv runs to hundreds of MB on a full run.
+/failures.csv
+*.csv.part*
+
 .DS_Store
