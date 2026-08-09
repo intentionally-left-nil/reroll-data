@@ -101,7 +101,18 @@ CREATE TABLE IF NOT EXISTS metadata_blob (
     -- truncate at the first NUL -- `length()` under-reports and `LIKE` fails
     -- to match past it, so any future SQL-side search would quietly miss data.
     z_body  BLOB NOT NULL,
-    stored_at INTEGER
+    stored_at INTEGER,
+    -- Structured fields pulled out of the body (name, version, license,
+    -- requires_dist, ...) via reroll.wheel_metadata.parse_metadata, serialised
+    -- as JSON text. Parsing the raw body on every read would mean re-running
+    -- packaging's email parser plus pydantic validation on every one of the
+    -- ~11M wheels every time; storing the result once per distinct body
+    -- (naturally deduplicated the same way z_body is) makes it a plain
+    -- column read instead. NULL means either not parsed yet (this row
+    -- predates the column -- see `_add_missing_columns`) or parsing failed;
+    -- `reroll_data.metadata` populates it for bodies fetched from here on.
+    -- Existing rows are backfilled separately.
+    parsed_json TEXT
 );
 
 -- Per-wheel fetch state machine. Narrow rows only; bodies live in
@@ -164,8 +175,32 @@ def connect(path: Path | str, *, read_only: bool = False) -> sqlite3.Connection:
     return db
 
 
+# Columns added to a table after its first release. `CREATE TABLE IF NOT
+# EXISTS` in `SCHEMA` above only creates a table that does not exist yet -- on
+# a database that already has the table (e.g. the multi-day `v.db` corpus),
+# it is a no-op and never adds a column a later version of `SCHEMA` introduced.
+# `_add_missing_columns` closes that gap with `ALTER TABLE ... ADD COLUMN`,
+# which SQLite performs in place (existing rows read back NULL for it; nothing
+# is rewritten or rebuilt), so it is safe to run against a database that
+# already holds data. A brand new database gets the column straight from
+# `SCHEMA` instead, so each entry here only ever fires once per database, the
+# first time `init()` runs after upgrading.
+_ADDED_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "metadata_blob": [("parsed_json", "TEXT")],
+}
+
+
+def _add_missing_columns(db: sqlite3.Connection) -> None:
+    for table, columns in _ADDED_COLUMNS.items():
+        existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        for name, coltype in columns:
+            if name not in existing:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {coltype}")
+
+
 def init(db: sqlite3.Connection) -> None:
     db.executescript(SCHEMA)
+    _add_missing_columns(db)
 
 
 def get_meta(db: sqlite3.Connection, key: str) -> str | None:

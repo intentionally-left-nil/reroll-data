@@ -77,6 +77,15 @@ from . import crawl as _crawl
 from . import db as _db
 from .ratelimit import TokenBucket
 
+# `reroll` is an optional dependency (see pyproject.toml's `probe` group) --
+# the crawl/metadata pipeline must keep working without it. When present,
+# every newly-fetched body gets parsed into `metadata_blob.parsed_json`;
+# otherwise that column is simply left NULL for new rows too.
+try:
+    from reroll.wheel_metadata import parse_metadata
+except ImportError:  # pragma: no cover - exercised by installs without `reroll`
+    parse_metadata = None  # type: ignore[assignment]
+
 #: zlib level. 6 measured 2.81x on real bodies; 9 gained 0.1% for ~4x the CPU.
 ZLIB_LEVEL = 6
 
@@ -95,6 +104,45 @@ class Result:
     error: str | None = None
     #: True when the body was already held, so no request was made.
     deduped: bool = False
+    #: JSON text from `reroll.wheel_metadata.parse_metadata`, or None when
+    #: `reroll` is unavailable, the body failed to decode/parse, or (for a
+    #: deduped hit) there was no freshly-fetched body to parse in the first
+    #: place -- the existing `metadata_blob` row is left untouched either way.
+    parsed_json: str | None = None
+
+
+def _parse_metadata_json(body: bytes, *, context: str) -> str | None:
+    """Best-effort parse of a METADATA body into JSON text.
+
+    `context` identifies the body in log output only (e.g. "project/filename"
+    for a live fetch, or a bare sha256 for the backfill, which has no
+    project/filename of its own -- one body can back several wheels).
+
+    Returns None rather than raising: a body that fails to decode or fails
+    pydantic validation must not take down the fetch of an otherwise-good
+    wheel, it just leaves `parsed_json` NULL for backfilling later. Failures
+    are printed to stdout (not counted/rate-limited) so a wave of them is
+    visible on the console during a run rather than only discoverable later
+    via `SELECT count(*) ... WHERE parsed_json IS NULL`.
+    """
+    if parse_metadata is None:
+        return None
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        print(
+            f"  ! metadata parse failed for {context}: undecodable body: {exc}",
+            file=sys.stdout,
+        )
+        return None
+    try:
+        return parse_metadata(text).model_dump_json()
+    except Exception as exc:  # noqa: BLE001 - malformed upstream METADATA is expected
+        print(
+            f"  ! metadata parse failed for {context}: {type(exc).__name__}: {exc}",
+            file=sys.stdout,
+        )
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -326,11 +374,14 @@ def _writer(
                 if res.status == "done" and res.z_body is not None:
                     # Body and pointer land in one transaction, so blob_sha256
                     # can never reference a row that was not written. Two
-                    # results in this batch sharing a digest collapse here.
+                    # results in this batch sharing a digest collapse here --
+                    # DO NOTHING is fine since parse_metadata is deterministic
+                    # over the same body, so whichever result wins carries the
+                    # same parsed_json either way.
                     db.execute(
-                        "INSERT INTO metadata_blob(sha256, n_bytes, z_body, stored_at) "
-                        "VALUES(?,?,?,?) ON CONFLICT(sha256) DO NOTHING",
-                        (res.sha256, res.n_bytes, res.z_body, now),
+                        "INSERT INTO metadata_blob(sha256, n_bytes, z_body, stored_at, parsed_json) "
+                        "VALUES(?,?,?,?,?) ON CONFLICT(sha256) DO NOTHING",
+                        (res.sha256, res.n_bytes, res.z_body, now, res.parsed_json),
                     )
                 db.execute(
                     "UPDATE wheel_metadata SET state = ?, blob_sha256 = ?, "
@@ -538,6 +589,9 @@ def fetch(
                                 sha256=hashlib.sha256(body).hexdigest(),
                                 z_body=zlib.compress(body, ZLIB_LEVEL),
                                 n_bytes=len(body),
+                                parsed_json=_parse_metadata_json(
+                                    body, context=f"{project}/{filename}"
+                                ),
                             )
                         )
                     elif status == "missing":

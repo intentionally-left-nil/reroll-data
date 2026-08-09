@@ -8,9 +8,11 @@ import sys
 import zlib
 from pathlib import Path
 
+from . import backfill as _backfill
 from . import crawl as _crawl
 from . import db as _db
 from . import metadata as _metadata
+from . import retry_metadata_conversion as _retry_metadata_conversion
 
 
 def _fmt(stats: dict) -> str:
@@ -152,6 +154,30 @@ def cmd_metadata_show(args: argparse.Namespace) -> int:
     # valid UTF-8, which is why it is stored as a BLOB in the first place.
     sys.stdout.buffer.write(zlib.decompress(row[0]))
     return 0
+
+
+def cmd_metadata_backfill(args: argparse.Namespace) -> int:
+    out = _backfill.backfill_parsed(
+        Path(args.db),
+        workers=args.workers,
+        limit=args.limit,
+        read_batch=args.batch_size,
+    )
+    print("backfill finished:", file=sys.stderr)
+    print(_fmt(out), file=sys.stderr)
+    return 1 if out.get("interrupted") else 0
+
+
+def cmd_metadata_retry_conversion(args: argparse.Namespace) -> int:
+    out = _retry_metadata_conversion.retry_metadata_conversion(
+        Path(args.db), args.sha256
+    )
+    print(
+        f"blob {out['sha256']} (id {out['id']}): "
+        f"{'parsed' if out['parsed'] else 'failed to parse'}",
+        file=sys.stderr,
+    )
+    return 0 if out["parsed"] else 1
 
 
 def cmd_export(args: argparse.Namespace) -> int:
@@ -296,6 +322,34 @@ def build_parser() -> argparse.ArgumentParser:
     mw = msub.add_parser("show", help="print one stored METADATA body to stdout")
     mw.add_argument("filename", help="wheel filename")
     mw.set_defaults(func=cmd_metadata_show)
+
+    mb = msub.add_parser(
+        "backfill",
+        help="one-off: parse stored bodies into parsed_json (local, no network)",
+    )
+    mb.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="worker processes (default: all cores, via os.process_cpu_count())",
+    )
+    mb.add_argument(
+        "--limit", type=int, default=None, help="only backfill N blobs"
+    )
+    mb.add_argument(
+        "--batch-size",
+        type=int,
+        default=_backfill.READ_BATCH,
+        help="blobs read/committed per round trip (default: %(default)s)",
+    )
+    mb.set_defaults(func=cmd_metadata_backfill)
+
+    mr = msub.add_parser(
+        "retry-conversion",
+        help="one-off: force re-parse one blob's parsed_json (local, no network)",
+    )
+    mr.add_argument("sha256", help="metadata_blob.sha256 digest to re-parse")
+    mr.set_defaults(func=cmd_metadata_retry_conversion)
 
     e = sub.add_parser("export", help="dump wheel filenames")
     e.add_argument("-o", "--output", default="-", help="output path, or - for stdout")

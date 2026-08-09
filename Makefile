@@ -14,14 +14,29 @@ OUT      ?= failures.csv
 PACKAGE  ?=
 PWORKERS ?= 1
 
+# metadata backfill (see reroll_data.backfill): purely local CPU work, no
+# network, so unlike WORKERS above there is no politeness reason to cap it.
+# Left empty so the tool's own default (all cores, via
+# os.process_cpu_count()) applies unless overridden, e.g.
+# `make metadata-backfill BACKFILL_WORKERS=4`.
+BACKFILL_WORKERS ?=
+
+# retry-metadata-conversion (see reroll_data.retry_metadata_conversion): the
+# single metadata_blob.sha256 digest to force re-parse, e.g.
+# `make retry-metadata-conversion SHA256=abc123...`. No default -- there is no
+# sensible one for a single-row one-off, so the target fails loudly if unset.
+SHA256 ?=
+
 RUN        := uv run reroll-data --db $(DB)
 INVESTIGATE := uv run reroll-investigate --db $(DB)
 LIMIT_FLAG  = $(if $(LIMIT),--limit $(LIMIT),)
 PKG_FLAG    = $(if $(PACKAGE),--package $(PACKAGE),)
+BACKFILL_WORKERS_FLAG = $(if $(BACKFILL_WORKERS),--workers $(BACKFILL_WORKERS),)
 
 .PHONY: help status \
 	refresh crawl sync-filenames \
-	metadata-status metadata-sync metadata-fetch sync-metadata \
+	metadata-status metadata-sync metadata-fetch sync-metadata metadata-backfill \
+	retry-metadata-conversion \
 	investigate sync-probe
 
 help:
@@ -30,6 +45,8 @@ help:
 	@echo "  sync-metadata     metadata sync + fetch -- download METADATA bodies"
 	@echo "  status            counts for the wheel/project crawl"
 	@echo "  metadata-status   counts for the metadata download"
+	@echo "  metadata-backfill one-off: parse stored bodies into parsed_json (local, no network)"
+	@echo "  retry-metadata-conversion  one-off: force re-parse one blob's parsed_json (needs SHA256)"
 	@echo
 	@echo "Finer-grained steps: refresh, crawl, metadata-sync, metadata-fetch"
 	@echo
@@ -77,6 +94,22 @@ metadata-fetch:
 sync-metadata:
 	$(RUN) metadata sync
 	$(RUN) metadata fetch --rate $(RATE) --workers $(WORKERS) $(LIMIT_FLAG)
+
+# One-off: parse already-stored bodies into metadata_blob.parsed_json. Local
+# only (no network, no RATE/WORKERS), idempotent and resumable the same way
+# the rest of the metadata pipeline is -- safe to re-run after Ctrl-C.
+metadata-backfill:
+	$(RUN) metadata backfill $(BACKFILL_WORKERS_FLAG) $(LIMIT_FLAG)
+
+# One-off: force re-parse a single metadata_blob row, overwriting parsed_json
+# even if it is already set -- unlike metadata-backfill above, which skips
+# rows that already have one. For re-running one row after a parser fix.
+retry-metadata-conversion:
+	@if [ -z "$(SHA256)" ]; then \
+		echo "usage: make retry-metadata-conversion SHA256=<metadata_blob.sha256>" >&2; \
+		exit 1; \
+	fi
+	$(RUN) metadata retry-conversion $(SHA256)
 
 # --------------------------------------------------------------------------- #
 # diagnostics: run a probe over the corpus (see reroll_data.investigate)
