@@ -208,6 +208,19 @@ CREATE TABLE IF NOT EXISTS repodata_conversion (
 CREATE INDEX IF NOT EXISTS repodata_conversion_todo
     ON repodata_conversion(conda_pypi_compatible)
     WHERE conda_pypi_data IS NULL AND conda_pypi_error IS NULL;
+
+-- Same idea for `reroll_data.reroll_convert`'s claim scan, but with no
+-- compatibility column to index on -- reroll gets no filename pre-filter
+-- (see that module's docstring), so this indexes `(project, filename)`
+-- (already the table's own primary key) rather than a flag, which makes the
+-- index double as a covering index for the query's own `SELECT project,
+-- filename ... WHERE reroll_data IS NULL AND reroll_error IS NULL`: once
+-- most rows are done, both the seek *and* the read are satisfied entirely
+-- from this (small, shrinking) partial index, never touching the main
+-- (much wider) table b-tree.
+CREATE INDEX IF NOT EXISTS repodata_conversion_reroll_todo
+    ON repodata_conversion(project, filename)
+    WHERE reroll_data IS NULL AND reroll_error IS NULL;
 """
 
 

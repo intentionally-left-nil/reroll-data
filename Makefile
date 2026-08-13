@@ -35,6 +35,13 @@ SHA256 ?=
 # `make repodata-convert CONVERT_WORKERS=4`.
 CONVERT_WORKERS ?=
 
+# reroll-convert (see reroll_data.reroll_convert): purely local CPU work like
+# repodata-convert above, but runs in the ordinary uv venv, not the pixi one
+# -- `reroll` (unlike `conda_pypi`) is an ordinary optional dependency, see
+# `sync-probe` below. Left empty by default so the tool's own default (all
+# cores) applies, e.g. `make reroll-convert REROLL_WORKERS=4`.
+REROLL_WORKERS ?=
+
 RUN        := uv run reroll-data --db $(DB)
 INVESTIGATE := uv run reroll-investigate --db $(DB)
 # Runs the same `reroll-data` console script, but from inside the pixi
@@ -48,12 +55,13 @@ LIMIT_FLAG  = $(if $(LIMIT),--limit $(LIMIT),)
 PKG_FLAG    = $(if $(PACKAGE),--package $(PACKAGE),)
 BACKFILL_WORKERS_FLAG = $(if $(BACKFILL_WORKERS),--workers $(BACKFILL_WORKERS),)
 CONVERT_WORKERS_FLAG = $(if $(CONVERT_WORKERS),--workers $(CONVERT_WORKERS),)
+REROLL_WORKERS_FLAG = $(if $(REROLL_WORKERS),--workers $(REROLL_WORKERS),)
 
 .PHONY: help status \
 	refresh crawl sync-filenames \
 	metadata-status metadata-sync metadata-fetch sync-metadata metadata-backfill \
 	retry-metadata-conversion \
-	repodata-status sync-repodata repodata-convert-env repodata-convert \
+	repodata-status sync-repodata repodata-convert-env repodata-convert reroll-convert \
 	investigate sync-probe
 
 help:
@@ -62,6 +70,7 @@ help:
 	@echo "  sync-metadata     metadata sync + fetch -- download METADATA bodies"
 	@echo "  sync-repodata     reconcile wheel -> repodata_conversion (local, no network)"
 	@echo "  repodata-convert  run conda-pypi's translator over compatible wheels (needs pixi env)"
+	@echo "  reroll-convert    run reroll's own translator over every wheel (ordinary uv env)"
 	@echo "  status            counts for the wheel/project crawl"
 	@echo "  metadata-status   counts for the metadata download"
 	@echo "  repodata-status   counts for the reroll-vs-conda-pypi repodata comparison"
@@ -166,6 +175,16 @@ repodata-convert-env:
 # environment is always up to date before this runs -- never assumed.
 repodata-convert: repodata-convert-env
 	$(CONVERT) repodata convert $(CONVERT_WORKERS_FLAG) $(LIMIT_FLAG)
+
+# Runs reroll's own translator over every wheel in repodata_conversion, no
+# compatibility pre-filter (see reroll_data.reroll_convert's module
+# docstring), writing reroll_data/reroll_error back per row. Idempotent and
+# resumable like repodata-convert above -- safe to re-run after an
+# interrupted pass, and safe to re-run once converged (a no-op scan). Runs in
+# the ordinary uv env ($(RUN)), not the pixi one: unlike conda_pypi, reroll
+# is a normal (if optional) dependency here -- see `sync-probe`.
+reroll-convert:
+	$(RUN) repodata reroll-convert $(REROLL_WORKERS_FLAG) $(LIMIT_FLAG)
 
 # --------------------------------------------------------------------------- #
 # diagnostics: run a probe over the corpus (see reroll_data.investigate)

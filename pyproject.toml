@@ -24,15 +24,20 @@ reroll-investigate = "reroll_data.investigate:main"
 # `reroll-data` and `reroll-investigate` can share one environment anyway --
 # reroll needs packaging+pydantic, this repo needs pypi-simple+requests, and
 # neither constrains the other.
+#
+# The distribution is named `py-reroll` (reroll's own `pyproject.toml`
+# `[project.name]`) even though the importable module stays `reroll` --
+# `[tool.uv.build-backend] module-name = "reroll"` there is what makes
+# `from reroll import reroll` keep working unchanged everywhere in this repo.
 [dependency-groups]
-probe = ["reroll"]
+probe = ["py-reroll"]
 
 [tool.uv.sources]
 # Editable, so edits to ../reroll are picked up by the next `reroll-investigate`
 # run with no reinstall. Only a change to *reroll's own dependencies* needs
 # `make sync-probe`. The path assumes reroll is checked out beside this repo;
 # point --python at another environment if it lives elsewhere.
-reroll = { path = "../reroll", editable = true }
+py-reroll = { path = "../reroll", editable = true }
 
 # Included in the default sync so `uv run reroll-investigate` just works.
 [tool.uv]
@@ -69,7 +74,8 @@ build-backend = "uv_build"
 #     mirroring `[tool.uv.sources]` above) -- needed transitively because
 #     `reroll_data.cli` imports every subcommand module up front, including
 #     ones (`metadata.py`, `backfill.py`) that probe for `reroll` at import
-#     time.
+#     time. Distribution name `py-reroll`, same caveat as `[tool.uv.sources]`
+#     above -- the importable module stays `reroll`.
 #
 # Reused, never recreated: `pixi install` (or the first `pixi run`) solves and
 # builds this once; every later `pixi run` (including via `make
@@ -89,4 +95,4 @@ conda-pypi = ">=0.11.0"
 
 [tool.pixi.pypi-dependencies]
 reroll-data = { path = ".", editable = true }
-reroll = { path = "../reroll", editable = true }
+py-reroll = { path = "../reroll", editable = true }

@@ -14,6 +14,7 @@ from . import db as _db
 from . import metadata as _metadata
 from . import repodata_convert as _repodata_convert
 from . import repodata_sync as _repodata_sync
+from . import reroll_convert as _reroll_convert
 from . import retry_metadata_conversion as _retry_metadata_conversion
 
 
@@ -231,6 +232,28 @@ def cmd_repodata_convert(args: argparse.Namespace) -> int:
     )
     print("convert finished:", file=sys.stderr)
     print(_fmt(out), file=sys.stderr)
+    return 1 if out.get("interrupted") else 0
+
+
+def cmd_repodata_reroll_convert(args: argparse.Namespace) -> int:
+    db = _db.connect(args.db)
+    _db.init(db)
+    if args.retry_errors:
+        rearmed = _reroll_convert.reset_errors(db)
+        print(f"re-armed {rearmed:,} previously-failed wheels", file=sys.stderr)
+    db.close()
+
+    out = _reroll_convert.convert(
+        Path(args.db),
+        workers=args.workers,
+        limit=args.limit,
+        read_batch=args.read_batch,
+        chunksize=args.chunksize,
+        write_batch=args.write_batch,
+    )
+    print("convert finished:", file=sys.stderr)
+    for key, value in out.items():
+        print(f"  {key:<16} {value}", file=sys.stderr)
     return 1 if out.get("interrupted") else 0
 
 
@@ -464,6 +487,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="rows committed per write transaction (default: %(default)s)",
     )
     rpc.set_defaults(func=cmd_repodata_convert)
+
+    rrc = rpsub.add_parser(
+        "reroll-convert",
+        help=(
+            "run reroll's own translator over every corpus wheel -- no "
+            "compatibility pre-filter, runs in the ordinary uv env (needs "
+            "`uv sync --group probe`); idempotent, resumable"
+        ),
+    )
+    rrc.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="worker processes (default: all cores, via os.process_cpu_count())",
+    )
+    rrc.add_argument("--limit", type=int, default=None, help="only convert N wheels")
+    rrc.add_argument(
+        "--retry-errors",
+        action="store_true",
+        help="also re-attempt wheels previously marked reroll_error",
+    )
+    rrc.add_argument(
+        "--read-batch",
+        type=int,
+        default=_reroll_convert.READ_BATCH,
+        help="rows read per round trip (default: %(default)s)",
+    )
+    rrc.add_argument(
+        "--chunksize",
+        type=int,
+        default=_reroll_convert.CHUNKSIZE,
+        help="wheels handed to a worker process per task (default: %(default)s)",
+    )
+    rrc.add_argument(
+        "--write-batch",
+        type=int,
+        default=_reroll_convert.WRITE_BATCH,
+        help="rows committed per write transaction (default: %(default)s)",
+    )
+    rrc.set_defaults(func=cmd_repodata_reroll_convert)
 
     return p
 
