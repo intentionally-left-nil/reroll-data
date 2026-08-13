@@ -159,6 +159,55 @@ CREATE INDEX IF NOT EXISTS wheel_metadata_todo
 CREATE INDEX IF NOT EXISTS wheel_metadata_lease
     ON wheel_metadata(lease_until)
     WHERE state = 'lease';
+
+-- ------------------------------------------------------------------------- --
+-- Repodata conversion comparison: reroll's own translator vs upstream
+-- conda-pypi, run over every wheel. See :mod:`reroll_data.repodata_sync`.
+-- ------------------------------------------------------------------------- --
+
+-- One row per wheel. `repodata_sync.sync()` is the only writer that inserts
+-- rows and the only one that ever touches `conda_pypi_compatible`; everything
+-- else here (the two `_data`/`_error` pairs, and `reroll_compatible`) is left
+-- for whatever job actually runs each converter to fill in later -- sync()
+-- only ensures a row exists and that its filename-derived compatibility flag
+-- is set, the same division of labour as `wheel_metadata`'s `sync` vs `fetch`.
+CREATE TABLE IF NOT EXISTS repodata_conversion (
+    project               TEXT NOT NULL,
+    filename              TEXT NOT NULL,
+    -- JSON text of the repodata entry reroll's own translator produced, or
+    -- NULL if not yet attempted or the attempt errored.
+    reroll_data           TEXT,
+    -- Error message from reroll's attempt (type + message), or NULL if it
+    -- succeeded or has not been attempted yet.
+    reroll_error          TEXT,
+    -- JSON text of the repodata["v3"]["whl"] entry conda-pypi produced (see
+    -- reroll_data.conda_pypi_index_demo), or NULL if not yet attempted / errored.
+    conda_pypi_data       TEXT,
+    conda_pypi_error      TEXT,
+    -- 0/1, computed purely from the filename's (interpreter, abi, platform)
+    -- tag triple: interpreter GLOB 'py3*', abi = 'none', platform = 'any' --
+    -- see reroll_data.repodata_sync.is_conda_pypi_compatible. Set for every
+    -- row by sync(); never NULL once synced, regardless of whether the
+    -- conda-pypi conversion itself has run yet.
+    conda_pypi_compatible INTEGER NOT NULL,
+    -- 0/1/NULL. Unknown ("NULL") until a separate probe run against reroll
+    -- decides it -- sync() always inserts NULL here and never overwrites it.
+    reroll_compatible     INTEGER,
+    updated_at            INTEGER,
+    PRIMARY KEY (project, filename)
+) WITHOUT ROWID;
+
+-- Partial index over just the conda-pypi work still outstanding, so
+-- `repodata_convert.convert()`'s claim scan stays a seek once most rows have
+-- a conda_pypi_data or conda_pypi_error. Two IS NULL terms ANDed together are
+-- exactly the query's own WHERE clause (see `repodata_convert`), which is the
+-- straightforward conjunctive case SQLite's partial-index prover handles --
+-- unlike the IN/<> forms noted in `wheel_metadata_todo` above, which it does
+-- not. `conda_pypi_compatible` is the indexed column so `= 1` inside that
+-- narrowed set is a cheap seek rather than a second scan.
+CREATE INDEX IF NOT EXISTS repodata_conversion_todo
+    ON repodata_conversion(conda_pypi_compatible)
+    WHERE conda_pypi_data IS NULL AND conda_pypi_error IS NULL;
 """
 
 
@@ -271,3 +320,41 @@ def metadata_stats(
         )
         out["blob_bytes_raw"] = q("SELECT coalesce(sum(n_bytes), 0) FROM metadata_blob")
     return out
+
+
+def repodata_conversion_stats(db: sqlite3.Connection) -> dict[str, int]:
+    """Counts for the reroll-vs-conda-pypi repodata comparison.
+
+    Not folded into :func:`stats` for the same reason as :func:`metadata_stats`
+    -- this is its own full scan of a many-million-row table, so callers only
+    pay for it when they ask.
+    """
+    q = lambda sql: db.execute(sql).fetchone()[0]  # noqa: E731
+    return {
+        "tracked": q("SELECT count(*) FROM repodata_conversion"),
+        "wheels": q("SELECT count(*) FROM wheel"),
+        "conda_pypi_ok": q(
+            "SELECT count(*) FROM repodata_conversion WHERE conda_pypi_compatible = 1"
+        ),
+        "conda_pypi_data": q(
+            "SELECT count(*) FROM repodata_conversion WHERE conda_pypi_data IS NOT NULL"
+        ),
+        "conda_pypi_error": q(
+            "SELECT count(*) FROM repodata_conversion WHERE conda_pypi_error IS NOT NULL"
+        ),
+        "reroll_data": q(
+            "SELECT count(*) FROM repodata_conversion WHERE reroll_data IS NOT NULL"
+        ),
+        "reroll_error": q(
+            "SELECT count(*) FROM repodata_conversion WHERE reroll_error IS NOT NULL"
+        ),
+        "reroll_ok": q(
+            "SELECT count(*) FROM repodata_conversion WHERE reroll_compatible = 1"
+        ),
+        "reroll_bad": q(
+            "SELECT count(*) FROM repodata_conversion WHERE reroll_compatible = 0"
+        ),
+        "reroll_unknown": q(
+            "SELECT count(*) FROM repodata_conversion WHERE reroll_compatible IS NULL"
+        ),
+    }

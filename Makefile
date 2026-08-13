@@ -27,24 +27,44 @@ BACKFILL_WORKERS ?=
 # sensible one for a single-row one-off, so the target fails loudly if unset.
 SHA256 ?=
 
+# repodata convert (see reroll_data.repodata_convert): runs inside
+# conda-pypi's own pixi environment (see pyproject.toml's [tool.pixi.*]
+# tables), not the ordinary uv venv -- see CONVERT below. Purely local CPU
+# work like metadata-backfill, so CONVERT_WORKERS is left empty by default so
+# the tool's own default (all cores) applies, e.g.
+# `make repodata-convert CONVERT_WORKERS=4`.
+CONVERT_WORKERS ?=
+
 RUN        := uv run reroll-data --db $(DB)
 INVESTIGATE := uv run reroll-investigate --db $(DB)
+# Runs the same `reroll-data` console script, but from inside the pixi
+# environment `pyproject.toml` describes rather than the uv one `RUN` uses --
+# that is what makes `import conda_pypi` work. `pixi run` itself also
+# auto-installs/syncs that environment if it is missing or stale, but
+# `repodata-convert` below depends on `repodata-convert-env` explicitly
+# anyway, rather than relying on that implicit behavior.
+CONVERT    := pixi run --manifest-path pyproject.toml reroll-data --db $(DB)
 LIMIT_FLAG  = $(if $(LIMIT),--limit $(LIMIT),)
 PKG_FLAG    = $(if $(PACKAGE),--package $(PACKAGE),)
 BACKFILL_WORKERS_FLAG = $(if $(BACKFILL_WORKERS),--workers $(BACKFILL_WORKERS),)
+CONVERT_WORKERS_FLAG = $(if $(CONVERT_WORKERS),--workers $(CONVERT_WORKERS),)
 
 .PHONY: help status \
 	refresh crawl sync-filenames \
 	metadata-status metadata-sync metadata-fetch sync-metadata metadata-backfill \
 	retry-metadata-conversion \
+	repodata-status sync-repodata repodata-convert-env repodata-convert \
 	investigate sync-probe
 
 help:
 	@echo "Targets (override DB, RATE, WORKERS, LIMIT as needed):"
 	@echo "  sync-filenames    refresh + crawl -- discover and fetch .whl filenames"
 	@echo "  sync-metadata     metadata sync + fetch -- download METADATA bodies"
+	@echo "  sync-repodata     reconcile wheel -> repodata_conversion (local, no network)"
+	@echo "  repodata-convert  run conda-pypi's translator over compatible wheels (needs pixi env)"
 	@echo "  status            counts for the wheel/project crawl"
 	@echo "  metadata-status   counts for the metadata download"
+	@echo "  repodata-status   counts for the reroll-vs-conda-pypi repodata comparison"
 	@echo "  metadata-backfill one-off: parse stored bodies into parsed_json (local, no network)"
 	@echo "  retry-metadata-conversion  one-off: force re-parse one blob's parsed_json (needs SHA256)"
 	@echo
@@ -60,6 +80,9 @@ status:
 
 metadata-status:
 	$(RUN) metadata status
+
+repodata-status:
+	$(RUN) repodata status
 
 # --------------------------------------------------------------------------- #
 # filenames: discover every .whl on PyPI (see reroll_data.crawl)
@@ -110,6 +133,39 @@ retry-metadata-conversion:
 		exit 1; \
 	fi
 	$(RUN) metadata retry-conversion $(SHA256)
+
+# --------------------------------------------------------------------------- #
+# repodata: compare reroll's vs conda-pypi's repodata conversion
+# (see reroll_data.repodata_sync)
+# --------------------------------------------------------------------------- #
+
+# Idempotent and resumable, same as metadata-sync -- picks up anything crawl
+# just added, and is a no-op once converged. Purely local (no RATE/WORKERS):
+# this only creates rows and computes conda_pypi_compatible from filenames
+# already in `wheel`, it does not run either converter.
+sync-repodata:
+	$(RUN) repodata sync
+
+# One-time (or after pyproject.toml's [tool.pixi.*] tables change): solve and
+# install conda-pypi's pixi environment with this project (and reroll)
+# pip-installed editable into it. A prerequisite of repodata-convert below
+# (not just something to remember to run first) so the environment is always
+# created or synced automatically -- cheap and safe to depend on unconditionally:
+# `pixi install` no-ops in well under a second once the lockfile already
+# matches pyproject.toml, and only actually solves/reinstalls when something
+# relevant changed. Safe to also run by hand; same idempotent behavior either way.
+repodata-convert-env:
+	pixi install --manifest-path pyproject.toml
+
+# Runs conda-pypi's own translator over every wheel repodata-sync marked
+# conda_pypi_compatible, writing conda_pypi_data/conda_pypi_error back per
+# row. Idempotent and resumable like metadata-fetch -- safe to re-run after an
+# interrupted pass, and safe to re-run once converged (a no-op scan). Purely
+# local CPU work (no RATE): CONVERT_WORKERS defaults to the tool's own
+# default (all cores). Depends on repodata-convert-env, so the pixi
+# environment is always up to date before this runs -- never assumed.
+repodata-convert: repodata-convert-env
+	$(CONVERT) repodata convert $(CONVERT_WORKERS_FLAG) $(LIMIT_FLAG)
 
 # --------------------------------------------------------------------------- #
 # diagnostics: run a probe over the corpus (see reroll_data.investigate)
