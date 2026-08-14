@@ -179,6 +179,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/c4/ad/5ce88458a6d01147d600d72bb55f5086ff3ffa5f4085c6d3e37e91f4d591/pypi_simple-1.8.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c6/89/daba77b0167e3e03ead14cf0caa02193b6b9d402d03db93651ca9c9f1815/python_utils-4.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c6/c9/2218c1625cfcb8df9d8420ed32bda6cd27b410f3058d2b4c03b7026d4609/conda_lock-4.0.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/cf/66/e23613568fc01ca3e44149b3440c92254dd04568d3c835360a96d4f58151/markerpry-0.5.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d0/ef/6281be4ef86a6a0e6f06004c2e4526de3d880f4eaf4210a07a269ad330b3/ruamel.yaml.jinja2-0.2.7-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e0/f9/0595336914c5619e5f28a1fb793285925a8cd4b432c9da0a987836c7f822/shellingham-1.5.4-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e8/3d/1087453384dbde46a8c7f9356eead2c58be8a7bf156bca40243377c85715/more_itertools-11.1.0-py3-none-any.whl
@@ -346,6 +347,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/c4/ad/5ce88458a6d01147d600d72bb55f5086ff3ffa5f4085c6d3e37e91f4d591/pypi_simple-1.8.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c6/89/daba77b0167e3e03ead14cf0caa02193b6b9d402d03db93651ca9c9f1815/python_utils-4.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c6/c9/2218c1625cfcb8df9d8420ed32bda6cd27b410f3058d2b4c03b7026d4609/conda_lock-4.0.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/cf/66/e23613568fc01ca3e44149b3440c92254dd04568d3c835360a96d4f58151/markerpry-0.5.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d0/ef/6281be4ef86a6a0e6f06004c2e4526de3d880f4eaf4210a07a269ad330b3/ruamel.yaml.jinja2-0.2.7-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e0/f9/0595336914c5619e5f28a1fb793285925a8cd4b432c9da0a987836c7f822/shellingham-1.5.4-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e8/3d/1087453384dbde46a8c7f9356eead2c58be8a7bf156bca40243377c85715/more_itertools-11.1.0-py3-none-any.whl
@@ -504,6 +506,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/c4/ad/5ce88458a6d01147d600d72bb55f5086ff3ffa5f4085c6d3e37e91f4d591/pypi_simple-1.8.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c6/89/daba77b0167e3e03ead14cf0caa02193b6b9d402d03db93651ca9c9f1815/python_utils-4.0.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/c6/c9/2218c1625cfcb8df9d8420ed32bda6cd27b410f3058d2b4c03b7026d4609/conda_lock-4.0.2-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/cf/66/e23613568fc01ca3e44149b3440c92254dd04568d3c835360a96d4f58151/markerpry-0.5.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/d0/ef/6281be4ef86a6a0e6f06004c2e4526de3d880f4eaf4210a07a269ad330b3/ruamel.yaml.jinja2-0.2.7-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e0/f9/0595336914c5619e5f28a1fb793285925a8cd4b432c9da0a987836c7f822/shellingham-1.5.4-py2.py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/e8/3d/1087453384dbde46a8c7f9356eead2c58be8a7bf156bca40243377c85715/more_itertools-11.1.0-py3-none-any.whl
@@ -4247,11 +4250,13 @@ packages:
   size: 433413
   timestamp: 1764777166076
 - pypi: ../reroll
-  name: reroll
+  name: py-reroll
   requires_dist:
   - conda-lock>=4.0.2
   - grayskull>=3.1.1
+  - markerpry>=0.5.1
   - packaging>=26.1
+  - py-rattler>=0.25.0
   - pydantic>=2.13.4
   requires_python: '>=3.13'
 - pypi: ./
@@ -4688,6 +4693,13 @@ packages:
   - xattr>=1.0.0,<2.0.0 ; sys_platform == 'darwin'
   - zstandard>=0.15
   requires_python: '>=3.10'
+- pypi: https://files.pythonhosted.org/packages/cf/66/e23613568fc01ca3e44149b3440c92254dd04568d3c835360a96d4f58151/markerpry-0.5.1-py3-none-any.whl
+  name: markerpry
+  version: 0.5.1
+  sha256: f0a9b1be4c35fdb4570b9df6b64e9b2be884140a3c606be59808f3a1dea231c3
+  requires_dist:
+  - packaging>=26.3
+  requires_python: '>=3.13'
 - pypi: https://files.pythonhosted.org/packages/d0/ef/6281be4ef86a6a0e6f06004c2e4526de3d880f4eaf4210a07a269ad330b3/ruamel.yaml.jinja2-0.2.7-py2.py3-none-any.whl
   name: ruamel-yaml-jinja2
   version: 0.2.7

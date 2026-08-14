@@ -250,6 +250,7 @@ def cmd_repodata_reroll_convert(args: argparse.Namespace) -> int:
         read_batch=args.read_batch,
         chunksize=args.chunksize,
         write_batch=args.write_batch,
+        allow_pre=args.allow_pre,
     )
     print("convert finished:", file=sys.stderr)
     for key, value in out.items():
@@ -507,6 +508,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--retry-errors",
         action="store_true",
         help="also re-attempt wheels previously marked reroll_error",
+    )
+    rrc.add_argument(
+        "--allow-pre",
+        action="store_true",
+        help="accept a pre-release wheel version or dependency version",
     )
     rrc.add_argument(
         "--read-batch",

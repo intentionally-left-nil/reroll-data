@@ -186,9 +186,15 @@ repodata-convert: repodata-convert-env
 # passes --retry-errors, so every run also re-arms and re-attempts rows left
 # over from a previous reroll_error -- fine as a no-op when there are none,
 # and means a reroll fix takes effect on the very next `make reroll-convert`
-# with no separate step.
+# with no separate step. Always passes --allow-pre too: this pipeline builds
+# an archival mirror of the whole PyPI corpus, which is exactly the
+# "channel should include -alpha/-beta/-rc packages" case reroll's own
+# allow_pre docs (matchspec.md) describe as the intended reason to turn it
+# on -- without it, reroll rejects every pre-release wheel as out of scope
+# before it ever reaches the interpreter/platform checks, which is not what
+# a full-corpus conversion should do by default.
 reroll-convert:
-	$(RUN) repodata reroll-convert --retry-errors $(REROLL_WORKERS_FLAG) $(LIMIT_FLAG)
+	$(RUN) repodata reroll-convert --retry-errors --allow-pre $(REROLL_WORKERS_FLAG) $(LIMIT_FLAG)
 
 # --------------------------------------------------------------------------- #
 # diagnostics: run a probe over the corpus (see reroll_data.investigate)
