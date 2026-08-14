@@ -141,7 +141,13 @@ def _find_wheel(db: sqlite3.Connection, filename: str, project: str | None) -> t
 
 
 def _metadata_body(db: sqlite3.Connection, metadata_sha256: str | None) -> str:
-    """Decompress and decode the stored METADATA body for a wheel's digest."""
+    """Decompress and decode the stored METADATA body for a wheel's digest.
+
+    Decodes as UTF-8, falling back to cp1252 -- which accepts any byte
+    sequence, so this never itself raises -- for the rare pre-2010s upload
+    whose METADATA is not valid UTF-8, typically a non-ASCII
+    Author/Maintainer header encoded in Latin-1/cp1252.
+    """
     if metadata_sha256 is None:
         raise MetadataUnavailable(
             "wheel has no PEP 658 metadata sidecar recorded (metadata_sha256 IS NULL)"
@@ -155,7 +161,11 @@ def _metadata_body(db: sqlite3.Connection, metadata_sha256: str | None) -> str:
             "-- run `make sync-metadata` first"
         )
     (z_body,) = row
-    return zlib.decompress(z_body).decode("utf-8")
+    raw = zlib.decompress(z_body)
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252")
 
 
 def _entry_from_db(

@@ -159,6 +159,7 @@ def _entry_from_db(
     *,
     project: str | None = None,
     mappers: Any = None,
+    allow_pre: bool = False,
 ) -> list[dict[str, Any]]:
     """Core of :func:`wheel_to_records`, operating on an open connection.
 
@@ -178,6 +179,11 @@ def _entry_from_db(
     than leaving `mappers=None` and paying that cost per wheel;
     :mod:`reroll_data.reroll_convert`'s `_init_worker` does exactly that,
     once per worker process.
+
+    `allow_pre` is passed straight through to `get_wheel_records` as its
+    own `allow_pre` argument -- `False` (the default) rejects a
+    pre-release wheel version, or a pre-release dependency version, with
+    reroll's ordinary `scope`/`unconvertable` errors; `True` accepts both.
     """
     if get_wheel_records is None or parse_metadata is None:
         raise RuntimeError(
@@ -201,13 +207,23 @@ def _entry_from_db(
     # since `body` already *is* the METADATA text it would have produced.
     metadata = parse_metadata(body)
     records = get_wheel_records(
-        metadata, fn, mappers=mappers, sha256=wheel_sha256, size=size, url=url
+        metadata,
+        fn,
+        mappers=mappers,
+        sha256=wheel_sha256,
+        size=size,
+        url=url,
+        allow_pre=allow_pre,
     )
     return [record.model_dump(mode="json", exclude_none=True) for record in records]
 
 
 def wheel_to_records(
-    db_path: Path | str, filename: str, *, project: str | None = None
+    db_path: Path | str,
+    filename: str,
+    *,
+    project: str | None = None,
+    allow_pre: bool = False,
 ) -> list[dict[str, Any]]:
     """`WheelRecord`(s) reroll would produce for one corpus wheel, as plain
     dicts ready for `json.dumps`.
@@ -218,6 +234,10 @@ def wheel_to_records(
     skipping `reroll.stages.extract_metadata_file`, the one stage that needs
     a real wheel archive on disk (see the module docstring).
 
+    `allow_pre` is passed straight through to `get_wheel_records`: `False`
+    (the default) rejects a pre-release wheel version or dependency
+    version; `True` accepts both.
+
     Raises whatever `get_wheel_records` itself raises -- a `RerollError`
     leaf, see `reroll.errors` -- for a wheel reroll cannot convert;
     `WheelNotFound`/`MetadataUnavailable` for the obvious reasons; or
@@ -227,7 +247,7 @@ def wheel_to_records(
     """
     db = _db.connect(db_path, read_only=True)
     try:
-        return _entry_from_db(db, filename, project=project)
+        return _entry_from_db(db, filename, project=project, allow_pre=allow_pre)
     finally:
         db.close()
 
@@ -247,6 +267,11 @@ def main(argv: list[str] | None = None) -> int:
         "--project", default=None, help="disambiguate if filename is not unique"
     )
     parser.add_argument(
+        "--allow-pre",
+        action="store_true",
+        help="accept a pre-release wheel version or dependency version",
+    )
+    parser.add_argument(
         "--db",
         default=str(_db.DEFAULT_DB),
         type=Path,
@@ -255,7 +280,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        records = wheel_to_records(args.db, args.filename, project=args.project)
+        records = wheel_to_records(
+            args.db, args.filename, project=args.project, allow_pre=args.allow_pre
+        )
     except RuntimeError as exc:
         parser.error(str(exc))
         return 2  # pragma: no cover - argparse.error() exits already

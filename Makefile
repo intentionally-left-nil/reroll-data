@@ -70,7 +70,7 @@ help:
 	@echo "  sync-metadata     metadata sync + fetch -- download METADATA bodies"
 	@echo "  sync-repodata     reconcile wheel -> repodata_conversion (local, no network)"
 	@echo "  repodata-convert  run conda-pypi's translator over compatible wheels (needs pixi env)"
-	@echo "  reroll-convert    run reroll's own translator over every wheel (ordinary uv env)"
+	@echo "  reroll-convert    run reroll's own translator over every wheel, always retrying past errors (ordinary uv env)"
 	@echo "  status            counts for the wheel/project crawl"
 	@echo "  metadata-status   counts for the metadata download"
 	@echo "  repodata-status   counts for the reroll-vs-conda-pypi repodata comparison"
@@ -182,9 +182,13 @@ repodata-convert: repodata-convert-env
 # resumable like repodata-convert above -- safe to re-run after an
 # interrupted pass, and safe to re-run once converged (a no-op scan). Runs in
 # the ordinary uv env ($(RUN)), not the pixi one: unlike conda_pypi, reroll
-# is a normal (if optional) dependency here -- see `sync-probe`.
+# is a normal (if optional) dependency here -- see `sync-probe`. Always
+# passes --retry-errors, so every run also re-arms and re-attempts rows left
+# over from a previous reroll_error -- fine as a no-op when there are none,
+# and means a reroll fix takes effect on the very next `make reroll-convert`
+# with no separate step.
 reroll-convert:
-	$(RUN) repodata reroll-convert $(REROLL_WORKERS_FLAG) $(LIMIT_FLAG)
+	$(RUN) repodata reroll-convert --retry-errors $(REROLL_WORKERS_FLAG) $(LIMIT_FLAG)
 
 # --------------------------------------------------------------------------- #
 # diagnostics: run a probe over the corpus (see reroll_data.investigate)

@@ -122,8 +122,15 @@ _READ_DB: sqlite3.Connection | None = None
 # isn't importable", exactly like `_demo.get_wheel_records` being `None`.
 _NAME_MAPPERS: object | None = None
 
+# Also set once per worker process by `_init_worker`: whether a pre-release
+# wheel version or dependency version is accepted, threaded straight
+# through to every `_entry_from_db` call this process makes. Defaults to
+# `False` (reroll's own default) until `convert`'s own `allow_pre` argument
+# says otherwise.
+_ALLOW_PRE: bool = False
 
-def _init_worker(db_path: str) -> None:
+
+def _init_worker(db_path: str, allow_pre: bool) -> None:
     """`ProcessPoolExecutor` initializer: open this worker's own connection
     and build this worker's own name-mapper chain.
 
@@ -148,9 +155,10 @@ def _init_worker(db_path: str) -> None:
     should actually interrupt a human (see the module docstring's "Runtime
     errors stop the batch") still surfaces on the console immediately.
     """
-    global _READ_DB, _NAME_MAPPERS
+    global _READ_DB, _NAME_MAPPERS, _ALLOW_PRE
     _READ_DB = _db.connect(db_path, read_only=True)
     _NAME_MAPPERS = _demo.default_mappers() if _demo.default_mappers is not None else None
+    _ALLOW_PRE = allow_pre
     logging.getLogger("reroll").setLevel(logging.ERROR)
 
 
@@ -172,12 +180,15 @@ def _convert_one(item: tuple[str, str]) -> tuple[str, str, str | None, str | Non
     `get_wheel_records` reuses the same chain -- and the same
     `parselmouth_mapper` sqlite connection within it -- for every wheel this
     process ever converts instead of rebuilding it from scratch each call.
+    Passes this worker's `_ALLOW_PRE` (also set once by `_init_worker`)
+    straight through too, so every wheel in this run is held to the same
+    pre-release policy.
     """
     project, filename = item
     assert _READ_DB is not None, "worker process not initialized"
     try:
         records = _demo._entry_from_db(
-            _READ_DB, filename, project=project, mappers=_NAME_MAPPERS
+            _READ_DB, filename, project=project, mappers=_NAME_MAPPERS, allow_pre=_ALLOW_PRE
         )
     except Exception as exc:  # noqa: BLE001 - any conversion failure is data
         category = _demo.categorize_error(exc)
@@ -227,6 +238,7 @@ def convert(
     write_batch: int = WRITE_BATCH,
     limit: int | None = None,
     progress_every: float = 5.0,
+    allow_pre: bool = False,
 ) -> dict:
     """Populate `reroll_data`/`reroll_error` for every outstanding row.
 
@@ -235,6 +247,11 @@ def convert(
     resolution against sqlite/local caches, no per-wheel network request --
     see the module docstring) with no politeness constraint, unlike
     `reroll_data.metadata.fetch`.
+
+    `allow_pre` is threaded through to every worker's `_entry_from_db` call
+    (via `_init_worker`): `False` (the default, matching reroll's own) skips
+    a pre-release wheel or dependency version with a `scope`/`unconvertable`
+    error; `True` accepts both instead.
 
     Raises `RuntimeError` immediately, before starting the pool, if `reroll`
     is not importable -- i.e. the `probe` dependency group was never synced
@@ -340,7 +357,9 @@ def convert(
 
     try:
         with ProcessPoolExecutor(
-            max_workers=workers, initializer=_init_worker, initargs=(str(db_path),)
+            max_workers=workers,
+            initializer=_init_worker,
+            initargs=(str(db_path), allow_pre),
         ) as pool:
             while runtime_error is None:
                 n = read_batch if remaining_limit is None else min(
@@ -438,6 +457,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also re-attempt wheels previously marked reroll_error",
     )
+    parser.add_argument(
+        "--allow-pre",
+        action="store_true",
+        help="accept a pre-release wheel version or dependency version",
+    )
     parser.add_argument("--read-batch", type=int, default=READ_BATCH)
     parser.add_argument("--chunksize", type=int, default=CHUNKSIZE)
     parser.add_argument("--write-batch", type=int, default=WRITE_BATCH)
@@ -457,6 +481,7 @@ def main(argv: list[str] | None = None) -> int:
         read_batch=args.read_batch,
         chunksize=args.chunksize,
         write_batch=args.write_batch,
+        allow_pre=args.allow_pre,
     )
     print("convert finished:", file=sys.stderr)
     for key, value in out.items():
