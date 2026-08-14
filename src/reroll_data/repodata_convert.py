@@ -203,12 +203,7 @@ def convert(
     next_report = started + progress_every
     interrupted = False
     remaining_limit = limit
-
-    cur = read_db.execute(
-        "SELECT project, filename FROM repodata_conversion "
-        "WHERE conda_pypi_compatible = 1 "
-        "AND conda_pypi_data IS NULL AND conda_pypi_error IS NULL"
-    )
+    check_wal = _db.wal_monitor(db_path)
 
     pending_writes: list[tuple[str, str, str | None, str | None]] = []
     last_flush = time.monotonic()
@@ -240,6 +235,7 @@ def convert(
         if not force and now < next_report:
             return
         next_report = now + progress_every
+        check_wal()
         done = counters["ok"] + counters["error"]
         remaining = max(total - done, 0)
         elapsed = now - started
@@ -263,7 +259,19 @@ def convert(
                 )
                 if n <= 0:
                     break
-                rows = cur.fetchmany(n)
+                # Re-issued fresh every batch (and fully drained by
+                # `fetchall()`) rather than one cursor held open across the
+                # whole run -- see `reroll_data.db.wal_monitor`'s docstring
+                # for why a long-lived `SELECT` pins the WAL and blocks every
+                # checkpoint until the run ends. Already-converted rows drop
+                # out of this WHERE clause as soon as `flush()` commits them.
+                rows = read_db.execute(
+                    "SELECT project, filename FROM repodata_conversion "
+                    "WHERE conda_pypi_compatible = 1 "
+                    "AND conda_pypi_data IS NULL AND conda_pypi_error IS NULL "
+                    "LIMIT ?",
+                    (n,),
+                ).fetchall()
                 if not rows:
                     break
                 if remaining_limit is not None:
@@ -288,7 +296,6 @@ def convert(
     finally:
         flush()
         report(force=True)
-        cur.close()
         read_db.close()
         write_db.close()
 

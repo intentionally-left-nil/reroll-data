@@ -126,10 +126,7 @@ def backfill_parsed(
     next_report = started + progress_every
     interrupted = False
     remaining_limit = limit
-
-    cur = read_db.execute(
-        "SELECT id, sha256, z_body FROM metadata_blob WHERE parsed_json IS NULL"
-    )
+    check_wal = _db.wal_monitor(db_path)
 
     def report(force: bool = False) -> None:
         nonlocal next_report
@@ -137,6 +134,7 @@ def backfill_parsed(
         if not force and now < next_report:
             return
         next_report = now + progress_every
+        check_wal()
         done = counters["processed"]
         success = done - counters["errors"]
         remaining = max(total - done, 0)
@@ -163,7 +161,17 @@ def backfill_parsed(
                 )
                 if n <= 0:
                     break
-                rows = cur.fetchmany(n)
+                # Re-issued fresh every batch (and fully drained by
+                # `fetchall()`) rather than one cursor held open across the
+                # whole run -- see `reroll_data.db.wal_monitor`'s docstring
+                # for why a long-lived `SELECT` pins the WAL and blocks every
+                # checkpoint until the run ends. Already-backfilled rows drop
+                # out of this WHERE clause as soon as the batch below commits.
+                rows = read_db.execute(
+                    "SELECT id, sha256, z_body FROM metadata_blob "
+                    "WHERE parsed_json IS NULL LIMIT ?",
+                    (n,),
+                ).fetchall()
                 if not rows:
                     break
                 if remaining_limit is not None:
@@ -205,7 +213,6 @@ def backfill_parsed(
         )
     finally:
         report(force=True)
-        cur.close()
         read_db.close()
         write_db.close()
 

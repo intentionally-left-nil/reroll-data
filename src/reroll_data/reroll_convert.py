@@ -303,11 +303,7 @@ def convert(
     interrupted = False
     runtime_error: tuple[str, str, str] | None = None
     remaining_limit = limit
-
-    cur = read_db.execute(
-        "SELECT project, filename FROM repodata_conversion "
-        "WHERE reroll_data IS NULL AND reroll_error IS NULL"
-    )
+    check_wal = _db.wal_monitor(db_path)
 
     pending_writes: list[tuple[str, str, str | None, str | None]] = []
 
@@ -335,6 +331,7 @@ def convert(
         if not force and now < next_report:
             return
         next_report = now + progress_every
+        check_wal()
         done = sum(counters.values())
         errors = done - counters["ok"]
         remaining = max(total - done, 0)
@@ -367,7 +364,23 @@ def convert(
                 )
                 if n <= 0:
                     break
-                rows = cur.fetchmany(n)
+                # Re-issued fresh every batch (and fully drained by
+                # `fetchall()`) rather than one cursor held open across the
+                # whole run: an unfinished `SELECT` keeps SQLite's read
+                # transaction open for as long as the statement lives, which
+                # pins the WAL and blocks every automatic checkpoint attempt
+                # from making progress until the run ends -- see
+                # `reroll_data.db.wal_monitor`'s docstring. Already-converted
+                # rows drop out of this WHERE clause (and its covering
+                # partial index) as soon as `flush()` commits them, so a
+                # fresh query here naturally picks up where the last batch
+                # left off.
+                rows = read_db.execute(
+                    "SELECT project, filename FROM repodata_conversion "
+                    "WHERE reroll_data IS NULL AND reroll_error IS NULL "
+                    "LIMIT ?",
+                    (n,),
+                ).fetchall()
                 if not rows:
                     break
                 if remaining_limit is not None:
@@ -405,7 +418,6 @@ def convert(
     finally:
         flush()
         report(force=True)
-        cur.close()
         read_db.close()
         write_db.close()
 

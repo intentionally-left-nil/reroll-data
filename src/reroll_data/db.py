@@ -12,8 +12,10 @@ single dedicated writer thread; see :mod:`reroll_data.crawl`.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
+from typing import Callable
 
 # The corpus the crawl actually populates, so bare `reroll-data` and
 # `reroll-investigate` invocations agree with the Makefile instead of pointing
@@ -235,6 +237,67 @@ def connect(path: Path | str, *, read_only: bool = False) -> sqlite3.Connection:
     db.execute("PRAGMA busy_timeout=60000")
     db.execute("PRAGMA foreign_keys=ON")
     return db
+
+
+#: Default threshold for :func:`wal_monitor`'s first warning. SQLite's own
+#: automatic checkpoint fires every ~4 MB (`wal_autocheckpoint`'s default of
+#: 1000 pages) and normally keeps `-wal` near that size, so anything reaching
+#: this size means checkpointing has stalled, not just fallen behind briefly.
+WAL_WARN_BYTES = 256 * 1024 * 1024  # 256 MiB
+
+
+def wal_monitor(
+    path: Path | str,
+    *,
+    threshold_bytes: int = WAL_WARN_BYTES,
+    logger: logging.Logger | None = None,
+) -> Callable[[], int]:
+    """Build a callable that logs loudly the first time (and again each time
+    it doubles again past) `<path>-wal` crosses `threshold_bytes`.
+
+    A `-wal` file that keeps growing well past SQLite's own automatic
+    checkpoint threshold almost always means a checkpoint has stopped making
+    progress entirely -- most likely a long-lived reader (an open cursor, or
+    an idle connection from e.g. a notebook) pinning the oldest snapshot the
+    WAL cannot be trimmed past. See `reroll_convert.convert`/
+    `repodata_convert.convert`/`backfill.backfill_parsed`, which used to hold
+    exactly such a cursor open for an entire multi-hour run before this was
+    fixed.
+
+    Callers are expected to invoke the returned callable periodically (e.g.
+    once per progress report, not once per row) -- the doubling threshold
+    keeps this from spamming the log even if called often while the WAL
+    stays oversized for a long time.
+    """
+    log = logger or logging.getLogger(__name__)
+    wal_path = Path(str(path) + "-wal")
+    next_warn = threshold_bytes
+
+    def check() -> int:
+        nonlocal next_warn
+        try:
+            size = wal_path.stat().st_size
+        except FileNotFoundError:
+            return 0
+        if size >= next_warn:
+            log.warning(
+                "%s has grown to %.0f MiB (>= %.0f MiB threshold) -- "
+                "checkpointing looks stuck. Likely cause: a long-lived "
+                "reader (an open cursor or idle connection) pinning the WAL "
+                "snapshot -- check `lsof %s*` for other open connections. "
+                "Once nothing else has the db open: "
+                "sqlite3 %s \"PRAGMA wal_checkpoint(TRUNCATE);\"",
+                wal_path,
+                size / (1024 * 1024),
+                next_warn / (1024 * 1024),
+                path,
+                path,
+            )
+            while size >= next_warn:
+                next_warn *= 2
+        return size
+
+    return check
 
 
 # Columns added to a table after its first release. `CREATE TABLE IF NOT
