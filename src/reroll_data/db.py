@@ -434,3 +434,44 @@ def repodata_conversion_stats(db: sqlite3.Connection) -> dict[str, int]:
             "SELECT count(*) FROM repodata_conversion WHERE reroll_compatible IS NULL"
         ),
     }
+
+
+def reroll_status_stats(db: sqlite3.Connection) -> dict[str, int]:
+    """Per-category counts for reroll's own conversion attempt.
+
+    Breaks `repodata_conversion.reroll_error` down by the category prefix
+    :func:`reroll_data.reroll_index_demo.format_error` writes (see
+    :data:`reroll_data.reroll_index_demo.CATEGORIES`), alongside `"ok"`
+    (`reroll_data IS NOT NULL`) and `"outstanding"` (neither column set yet
+    -- not yet attempted). One query, one full scan of `repodata_conversion`
+    -- not folded into :func:`repodata_conversion_stats` for the same reason
+    that function is not folded into :func:`stats`: callers only pay for a
+    many-million-row scan when they actually ask for this breakdown.
+    """
+    row = db.execute(
+        "SELECT "
+        "count(*) AS tracked, "
+        "sum(reroll_data IS NOT NULL) AS ok, "
+        "sum(reroll_error LIKE 'scope:%') AS scope, "
+        "sum(reroll_error LIKE 'invalid:%') AS invalid, "
+        "sum(reroll_error LIKE 'unconvertable:%') AS unconvertable, "
+        "sum(reroll_error LIKE 'runtime:%') AS runtime, "
+        "sum(reroll_error LIKE 'unavailable:%') AS unavailable, "
+        "sum(reroll_error LIKE 'unexpected:%') AS unexpected, "
+        "sum(reroll_data IS NULL AND reroll_error IS NULL) AS outstanding "
+        "FROM repodata_conversion"
+    ).fetchone()
+    keys = (
+        "tracked",
+        "ok",
+        "scope",
+        "invalid",
+        "unconvertable",
+        "runtime",
+        "unavailable",
+        "unexpected",
+        "outstanding",
+    )
+    out = {k: v or 0 for k, v in zip(keys, row)}
+    out["wheels"] = db.execute("SELECT count(*) FROM wheel").fetchone()[0]
+    return out

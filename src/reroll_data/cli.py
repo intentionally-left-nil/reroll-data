@@ -203,6 +203,22 @@ def cmd_repodata_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_reroll_status(args: argparse.Namespace) -> int:
+    db = _db.connect(args.db, read_only=True)
+    _db.init(db)
+    s = _db.reroll_status_stats(db)
+    db.close()
+    print(_fmt(s))
+    ok, unconvertable, wheels = s["ok"], s["unconvertable"], s["wheels"]
+    coverage_pct = ok / wheels * 100 if wheels else 0.0
+    unconvertable_pct = (
+        unconvertable / (unconvertable + ok) * 100 if (unconvertable + ok) else 0.0
+    )
+    print(f"  {'coverage':<16} {coverage_pct:>11.1f}%  (ok / wheels)")
+    print(f"  {'unconvertable':<16} {unconvertable_pct:>11.1f}%  (unconvertable / (unconvertable + ok))")
+    return 0
+
+
 def cmd_repodata_convert(args: argparse.Namespace) -> int:
     db = _db.connect(args.db)
     _db.init(db)
@@ -448,6 +464,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     rpt = rpsub.add_parser("status", help="show repodata_conversion counts")
     rpt.set_defaults(func=cmd_repodata_status)
+
+    rrs = rpsub.add_parser(
+        "reroll-status",
+        help=(
+            "show reroll's own conversion counts by error category "
+            "(scope/invalid/unconvertable/runtime/unavailable/unexpected/ok), "
+            "plus coverage and unconvertable percentages"
+        ),
+    )
+    rrs.set_defaults(func=cmd_reroll_status)
 
     rpc = rpsub.add_parser(
         "convert",

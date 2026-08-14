@@ -18,6 +18,8 @@ Reports, and secondary analysis from the primary findings
 Conclusion and Recommendations
 ```
 
+Do NOT reach for the `sqlite3` CLI, `bash sqlite3 ...`, or ad-hoc `python3 -c` one-liners against `data/v.db` -- not even for a quick "let me just check something" query. This includes exploratory/scratch queries you don't intend to keep. Every query against v.db, no matter how small or throwaway, must run as a cell in the active nteract notebook, so the exploration trail is preserved and reusable. If there is no notebook open yet for the task, create one (or connect to the one already open) before running any SQL.
+
 You should keep this format in mind, even when doing exploratory work. Prefer to create a proper setup & cleaning cell once you know the structure of your data & goals, as opposed to creating ever-more-cells. Once a proper finding is uncovered, or data is adapted in the proper way, prefer editing existing cells, even previous cells to support the needed direction of the notebook. Save the beginning and end summary sections until after the notebook analysis is complete, so it will always match your final conclusions and findings.
 
 When making a new notebook, you must set the package manager to be uv, otherwise nteract will incorrectly try to reuse the pyproject.toml

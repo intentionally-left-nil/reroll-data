@@ -1,0 +1,45 @@
+[project]
+name = "reroll-data-notebooks"
+version = "0.1.0"
+description = "Shared uv environment for nteract notebooks under notebooks/"
+requires-python = ">=3.13"
+# Union of every dependency any notebook in this directory imports directly.
+# nteract resolves one project file per directory (walking upward), and uses
+# it in place of -- not merged with -- any individual notebook's own inline
+# `uv` metadata. So this file has to cover the superset of what's needed
+# across all notebooks here, deliberately, rather than being scoped to just
+# one notebook's analysis.
+#
+#   - pandas, polars, matplotlib, plotly, altair: data wrangling/plotting used
+#     by the v.db failure-analysis notebooks (reroll_v0.1.*_failure_analysis,
+#     conda_pypi_failures_analysis, pure_python_wheels_with_platform_markers).
+#   - numpy, packaging: used by the parselmouth/name-mapper notebooks.
+#   - py-reroll (editable, local checkout): the name-mapper and parselmouth
+#     notebooks import `reroll.*` directly to exercise its mapping algorithms
+#     against real data -- same editable-path setup as the root
+#     pyproject.toml's `[tool.uv.sources]`, just one directory deeper.
+#   - ipykernel: required for nteract/Jupyter to launch a kernel at all;
+#     the root project's separate conda-based pixi environment (which this
+#     directory would otherwise inherit, since nteract walks up looking for
+#     a project file) intentionally omits it -- that env exists only to run
+#     `reroll-data repodata convert`.
+#
+# NOTE: nteract's pixi-vs-uv detection is a plain substring search on this
+# file's raw text for the pixi-specific TOML table header (the "pixi" table
+# nested under "tool"), not a real TOML parse -- so don't spell that header
+# out literally anywhere in here, including comments, or this file gets
+# misdetected as a pixi project with none of the tables it expects.
+dependencies = [
+    "ipykernel",
+    "pandas",
+    "polars",
+    "matplotlib",
+    "plotly",
+    "altair",
+    "numpy",
+    "packaging",
+    "py-reroll",
+]
+
+[tool.uv.sources]
+py-reroll = { path = "../../reroll", editable = true }

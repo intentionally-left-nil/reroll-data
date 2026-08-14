@@ -62,6 +62,7 @@ REROLL_WORKERS_FLAG = $(if $(REROLL_WORKERS),--workers $(REROLL_WORKERS),)
 	metadata-status metadata-sync metadata-fetch sync-metadata metadata-backfill \
 	retry-metadata-conversion \
 	repodata-status sync-repodata repodata-convert-env repodata-convert reroll-convert \
+	reroll-status \
 	investigate sync-probe
 
 help:
@@ -74,6 +75,7 @@ help:
 	@echo "  status            counts for the wheel/project crawl"
 	@echo "  metadata-status   counts for the metadata download"
 	@echo "  repodata-status   counts for the reroll-vs-conda-pypi repodata comparison"
+	@echo "  reroll-status     reroll's own conversion counts by error category, + coverage %"
 	@echo "  metadata-backfill one-off: parse stored bodies into parsed_json (local, no network)"
 	@echo "  retry-metadata-conversion  one-off: force re-parse one blob's parsed_json (needs SHA256)"
 	@echo
@@ -92,6 +94,9 @@ metadata-status:
 
 repodata-status:
 	$(RUN) repodata status
+
+reroll-status:
+	$(RUN) repodata reroll-status
 
 # --------------------------------------------------------------------------- #
 # filenames: discover every .whl on PyPI (see reroll_data.crawl)
