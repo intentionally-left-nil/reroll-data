@@ -48,7 +48,7 @@ CONVERT_WORKERS ?=
 # cores) applies, e.g. `make reroll-convert REROLL_WORKERS=4`.
 REROLL_WORKERS ?=
 
-RUN        := uv run reroll-data --db $(DB)
+RUN        := uv run reroll-data --db $(DB) --data-dir $(DATA_DIR)
 INVESTIGATE := uv run reroll-investigate --db $(DB)
 # Runs the same `reroll-data` console script, but from inside the pixi
 # environment `pyproject.toml` describes rather than the uv one `RUN` uses --
@@ -65,7 +65,7 @@ REROLL_WORKERS_FLAG = $(if $(REROLL_WORKERS),--workers $(REROLL_WORKERS),)
 
 .PHONY: help status \
 	db-init db2-backfill \
-	refresh crawl sync-filenames \
+	refresh crawl sync-filenames sync-consistency \
 	metadata-status metadata-sync metadata-fetch sync-metadata metadata-backfill \
 	retry-metadata-conversion \
 	repodata-status sync-repodata repodata-convert-env repodata-convert reroll-convert \
@@ -76,12 +76,13 @@ help:
 	@echo "Targets (override DB, RATE, WORKERS, LIMIT as needed):"
 	@echo "  db-init           create main.db/pypi.db (new per-database schema, see reroll_data.db2)"
 	@echo "  db2-backfill      one-off: migrate v.db's pypi index/metadata into main.db/pypi.db (resumable)"
-	@echo "  sync-filenames    refresh + crawl -- discover and fetch .whl filenames"
+	@echo "  sync-filenames    refresh + crawl -- discover and fetch .whl filenames (main.db/pypi.db)"
+	@echo "  sync-consistency  rare: full reconciliation of main.db.wheel against pypi.db.pypi_index"
 	@echo "  sync-metadata     metadata sync + fetch -- download METADATA bodies"
 	@echo "  sync-repodata     reconcile wheel -> repodata_conversion (local, no network)"
 	@echo "  repodata-convert  run conda-pypi's translator over compatible wheels (needs pixi env)"
 	@echo "  reroll-convert    run reroll's own translator over every wheel, always retrying past errors (ordinary uv env)"
-	@echo "  status            counts for the wheel/project crawl"
+	@echo "  status            counts for the wheel/project crawl (legacy v.db)"
 	@echo "  metadata-status   counts for the metadata download"
 	@echo "  repodata-status   counts for the reroll-vs-conda-pypi repodata comparison"
 	@echo "  reroll-status     reroll's own conversion counts by error category, + coverage %"
@@ -128,7 +129,9 @@ db2-backfill:
 	uv run python -m reroll_data.db2_backfill --db $(DB) --data-dir $(DATA_DIR) $(LIMIT_FLAG)
 
 # --------------------------------------------------------------------------- #
-# filenames: discover every .whl on PyPI (see reroll_data.crawl)
+# filenames: discover every .whl on PyPI, into main.db/pypi.db
+# (see reroll_data.crawl; targets the new per-database schema exclusively --
+# refresh/crawl no longer touch the legacy v.db at all)
 # --------------------------------------------------------------------------- #
 
 refresh:
@@ -137,12 +140,22 @@ refresh:
 crawl:
 	$(RUN) crawl --rate $(RATE) --workers $(WORKERS) $(LIMIT_FLAG)
 
-# refresh queues whatever the root index reports as changed; crawl then drains
-# that queue. Run as one target (rather than making crawl depend on refresh)
-# so the order is fixed regardless of `make -j`.
+# refresh deletes any project the index no longer reports (from both
+# pypi.db and main.db) and queues whatever the root index reports as
+# changed; crawl then drains that queue, mirroring each fetched project's
+# wheels into main.db as it goes. Run as one target (rather than making
+# crawl depend on refresh) so the order is fixed regardless of `make -j`.
 sync-filenames:
 	$(RUN) refresh
 	$(RUN) crawl --rate $(RATE) --workers $(WORKERS) $(LIMIT_FLAG)
+
+# Rare: a full reconciliation of main.db.wheel against pypi.db.pypi_index
+# (two anti-joins -- add whatever main.db is missing, drop whatever it has
+# that pypi.db no longer lists). sync-filenames's own incremental path never
+# needs this; run it only for occasional hygiene or to recover after an
+# error. See reroll_data.crawl.sync_consistency.
+sync-consistency:
+	$(RUN) sync-consistency
 
 # --------------------------------------------------------------------------- #
 # metadata: download PEP 658 core-metadata bodies (see reroll_data.metadata)

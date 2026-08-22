@@ -47,38 +47,43 @@ def cmd_db_init(args: argparse.Namespace) -> int:
 
 
 def cmd_refresh(args: argparse.Namespace) -> int:
-    db = _db.connect(args.db)
-    _db.init(db)
+    """Fetch the root index into `pypi.db`/`main.db` (see `reroll_data.db2`).
+
+    Targets the new per-database schema exclusively -- `refresh`/`crawl`
+    no longer touch the legacy `--db`/`v.db` at all.
+    """
+    pypi_db = _db2.connect_pypi(args.data_dir)
+    main_db = _db2.connect_main(args.data_dir)
+    _db2.init_pypi(pypi_db)
+    _db2.init_main(main_db)
     print(f"fetching root index from {args.endpoint} ...", file=sys.stderr)
     info = _crawl.refresh_index(
-        db,
-        endpoint=args.endpoint,
-        user_agent=args.user_agent,
-        mark_removed=not args.no_mark_removed,
+        pypi_db, main_db, endpoint=args.endpoint, user_agent=args.user_agent
     )
     print("index refreshed:", file=sys.stderr)
     print(_fmt(info), file=sys.stderr)
-    db.close()
+    pypi_db.close()
+    main_db.close()
     return 0
 
 
 def cmd_crawl(args: argparse.Namespace) -> int:
-    db = _db.connect(args.db)
-    _db.init(db)
-    if _db.get_meta(db, "index_serial") is None:
-        db.close()
+    pypi_db = _db2.connect_pypi(args.data_dir)
+    _db2.init_pypi(pypi_db)
+    if _db2.get_meta(pypi_db, "index_serial") is None:
+        pypi_db.close()
         print(
             "no index snapshot yet -- run `reroll-data refresh` first.", file=sys.stderr
         )
         return 2
-    db.close()
+    pypi_db.close()
 
     print(
         f"crawling at {args.rate:.0f} req/min with {args.workers} workers ...",
         file=sys.stderr,
     )
     out = _crawl.crawl(
-        Path(args.db),
+        args.data_dir,
         workers=args.workers,
         rate_per_minute=args.rate,
         limit=args.limit,
@@ -90,6 +95,23 @@ def cmd_crawl(args: argparse.Namespace) -> int:
     print("crawl finished:", file=sys.stderr)
     print(_fmt(out), file=sys.stderr)
     return 1 if out.get("interrupted") else 0
+
+
+def cmd_sync_consistency(args: argparse.Namespace) -> int:
+    """Full reconciliation of `main.db.wheel` against `pypi.db.pypi_index`.
+
+    Rare by design (see `reroll_data.crawl.sync_consistency`'s docstring) --
+    a full scan of both tables, meant for occasional hygiene or after an
+    error, not for every regular `sync-filenames` run.
+    """
+    print(
+        "reconciling main.db.wheel against pypi.db.pypi_index (full scan) ...",
+        file=sys.stderr,
+    )
+    out = _crawl.sync_consistency(args.data_dir)
+    print("sync-consistency finished:", file=sys.stderr)
+    print(_fmt(out), file=sys.stderr)
+    return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -354,6 +376,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=_crawl.USER_AGENT,
         help="User-Agent to identify this crawler to PyPI",
     )
+    p.add_argument(
+        "--data-dir",
+        default=str(_db2.DEFAULT_DATA_DIR),
+        help=(
+            "directory main.db/pypi.db live under -- used by `db init`, "
+            f"`refresh`, `crawl`, and `sync-consistency` (default: {_db2.DEFAULT_DATA_DIR})"
+        ),
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
     d = sub.add_parser(
@@ -366,24 +396,14 @@ def build_parser() -> argparse.ArgumentParser:
         "init",
         help="create main.db and pypi.db if missing (non-destructive; leaves v.db alone)",
     )
-    di.add_argument(
-        "--data-dir",
-        default=str(_db2.DEFAULT_DATA_DIR),
-        help=(
-            "directory to create main.db/pypi.db under "
-            f"(default: {_db2.DEFAULT_DATA_DIR})"
-        ),
-    )
     di.set_defaults(func=cmd_db_init)
 
     r = sub.add_parser(
         "refresh",
-        help="fetch the root index and queue projects whose serial advanced",
-    )
-    r.add_argument(
-        "--no-mark-removed",
-        action="store_true",
-        help="do not mark projects missing from the index as 'gone'",
+        help=(
+            "fetch the root index into pypi.db/main.db, deleting any project "
+            "the index no longer reports (see reroll_data.crawl)"
+        ),
     )
     r.set_defaults(func=cmd_refresh)
 
@@ -403,6 +423,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     c.add_argument("--batch-size", type=int, default=500, help="projects per commit")
     c.set_defaults(func=cmd_crawl)
+
+    sc = sub.add_parser(
+        "sync-consistency",
+        help=(
+            "full reconciliation of main.db.wheel against pypi.db.pypi_index "
+            "-- rare (full scan); see reroll_data.crawl.sync_consistency"
+        ),
+    )
+    sc.set_defaults(func=cmd_sync_consistency)
 
     s = sub.add_parser("status", help="show counts")
     s.set_defaults(func=cmd_status)
