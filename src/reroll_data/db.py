@@ -440,8 +440,10 @@ def reroll_status_stats(db: sqlite3.Connection) -> dict[str, int]:
     """Per-category counts for reroll's own conversion attempt.
 
     Breaks `repodata_conversion.reroll_error` down by the category prefix
-    :func:`reroll_data.reroll_index_demo.format_error` writes (see
-    :data:`reroll_data.reroll_index_demo.CATEGORIES`), alongside `"ok"`
+    the (now-removed) `reroll_index_demo.format_error` used to write for
+    this legacy `v.db` table -- see `reroll_data.reroll_convert` for the
+    current, `main.db`-based equivalent and its own category vocabulary --
+    alongside `"ok"`
     (`reroll_data IS NOT NULL`) and `"outstanding"` (neither column set yet
     -- not yet attempted). One query, one full scan of `repodata_conversion`
     -- not folded into :func:`repodata_conversion_stats` for the same reason

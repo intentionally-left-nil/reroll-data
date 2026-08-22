@@ -15,7 +15,7 @@ dependencies = [
     "urllib3>=2.0",
     # The thing under test, and now a required dependency (not gated behind an
     # optional group) -- reroll_data.metadata/backfill/retry_metadata_conversion/
-    # reroll_convert/reroll_index_demo all import it unconditionally. Pinned to
+    # reroll_convert all import it unconditionally. Pinned to
     # the published PyPI release (distribution name `py-reroll`; the importable
     # module stays `reroll`) rather than a local editable checkout -- reroll is
     # stable enough now that this repo tracks its released versions instead of

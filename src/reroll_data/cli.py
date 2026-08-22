@@ -297,16 +297,26 @@ def cmd_repodata_convert(args: argparse.Namespace) -> int:
     return 1 if out.get("interrupted") else 0
 
 
-def cmd_repodata_reroll_convert(args: argparse.Namespace) -> int:
-    db = _db.connect(args.db)
-    _db.init(db)
+def cmd_convert(args: argparse.Namespace) -> int:
+    """Run reroll's own translator over every outstanding `main.db.wheel`
+    row -- the `main.db`/`pypi.db` (db2) replacement for the old,
+    `v.db`-based `repodata reroll-convert`. See `reroll_data.reroll_convert`.
+    """
+    main_db = _db2.connect_main(args.data_dir)
+    _db2.init_main(main_db)
     if args.retry_errors:
-        rearmed = _reroll_convert.reset_errors(db)
+        rearmed = _reroll_convert.reset_errors(main_db)
         print(f"re-armed {rearmed:,} previously-failed wheels", file=sys.stderr)
-    db.close()
+    if args.retry_stale_version:
+        rearmed = _reroll_convert.reset_stale_version(main_db)
+        print(
+            f"re-armed {rearmed:,} wheels converted by a different reroll_version",
+            file=sys.stderr,
+        )
+    main_db.close()
 
     out = _reroll_convert.convert(
-        Path(args.db),
+        args.data_dir,
         workers=args.workers,
         limit=args.limit,
         read_batch=args.read_batch,
@@ -381,8 +391,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(_db2.DEFAULT_DATA_DIR),
         help=(
             "directory main.db/pypi.db live under -- used by `db init`, "
-            "`refresh`, `crawl`, `sync-consistency`, and `metadata sync`/"
-            f"`fetch`/`status`/`show` (default: {_db2.DEFAULT_DATA_DIR})"
+            "`refresh`, `crawl`, `sync-consistency`, `convert`, and "
+            "`metadata sync`/`fetch`/`status`/`show` "
+            f"(default: {_db2.DEFAULT_DATA_DIR})"
         ),
     )
     sub = p.add_subparsers(dest="command", required=True)
@@ -589,50 +600,54 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rpc.set_defaults(func=cmd_repodata_convert)
 
-    rrc = rpsub.add_parser(
-        "reroll-convert",
+    cv = sub.add_parser(
+        "convert",
         help=(
-            "run reroll's own translator over every corpus wheel -- no "
-            "compatibility pre-filter, runs in the ordinary uv env (needs "
-            "`uv sync --group probe`); idempotent, resumable"
+            "run reroll's own translator over every outstanding main.db.wheel "
+            "row (main.db/pypi.db, db2); idempotent, resumable"
         ),
     )
-    rrc.add_argument(
+    cv.add_argument(
         "--workers",
         type=int,
         default=None,
         help="worker processes (default: all cores, via os.process_cpu_count())",
     )
-    rrc.add_argument("--limit", type=int, default=None, help="only convert N wheels")
-    rrc.add_argument(
+    cv.add_argument("--limit", type=int, default=None, help="only convert N wheels")
+    cv.add_argument(
         "--retry-errors",
         action="store_true",
-        help="also re-attempt wheels previously marked reroll_error",
+        help="also re-attempt wheels previously marked with a non-ok conversion_status",
     )
-    rrc.add_argument(
+    cv.add_argument(
+        "--retry-stale-version",
+        action="store_true",
+        help="also re-attempt wheels last converted by a different reroll_version",
+    )
+    cv.add_argument(
         "--allow-pre",
         action="store_true",
-        help="accept a pre-release wheel version or dependency version",
+        help="accept a pre-release wheel version or dependency version on the first attempt",
     )
-    rrc.add_argument(
+    cv.add_argument(
         "--read-batch",
         type=int,
         default=_reroll_convert.READ_BATCH,
         help="rows read per round trip (default: %(default)s)",
     )
-    rrc.add_argument(
+    cv.add_argument(
         "--chunksize",
         type=int,
         default=_reroll_convert.CHUNKSIZE,
         help="wheels handed to a worker process per task (default: %(default)s)",
     )
-    rrc.add_argument(
+    cv.add_argument(
         "--write-batch",
         type=int,
         default=_reroll_convert.WRITE_BATCH,
         help="rows committed per write transaction (default: %(default)s)",
     )
-    rrc.set_defaults(func=cmd_repodata_reroll_convert)
+    cv.set_defaults(func=cmd_convert)
 
     return p
 

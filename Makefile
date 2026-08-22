@@ -81,7 +81,7 @@ help:
 	@echo "  sync-metadata     metadata sync + fetch -- download METADATA bodies"
 	@echo "  sync-repodata     reconcile wheel -> repodata_conversion (local, no network)"
 	@echo "  repodata-convert  run conda-pypi's translator over compatible wheels (needs pixi env)"
-	@echo "  reroll-convert    run reroll's own translator over every wheel, always retrying past errors (ordinary uv env)"
+	@echo "  reroll-convert    run reroll's own translator over every outstanding main.db.wheel row, always retrying past errors + stale reroll_version (ordinary uv env)"
 	@echo "  status            counts for the wheel/project crawl (legacy v.db)"
 	@echo "  metadata-status   counts for the metadata download"
 	@echo "  repodata-status   counts for the reroll-vs-conda-pypi repodata comparison"
@@ -223,26 +223,30 @@ repodata-convert-env:
 repodata-convert: repodata-convert-env
 	$(CONVERT) repodata convert $(CONVERT_WORKERS_FLAG) $(LIMIT_FLAG)
 
-# Runs reroll's own translator over every wheel in repodata_conversion, no
-# compatibility pre-filter (see reroll_data.reroll_convert's module
-# docstring), writing reroll_data/reroll_error back per row. Idempotent and
-# resumable like repodata-convert above -- safe to re-run after an
-# interrupted pass, and safe to re-run once converged (a no-op scan). Runs in
-# the ordinary uv env ($(RUN)), not the pixi one: unlike conda_pypi, reroll
-# is a normal, required dependency here, kept current by a plain `uv sync`.
-# Always
-# passes --retry-errors, so every run also re-arms and re-attempts rows left
-# over from a previous reroll_error -- fine as a no-op when there are none,
-# and means a reroll fix takes effect on the very next `make reroll-convert`
-# with no separate step. Always passes --allow-pre too: this pipeline builds
-# an archival mirror of the whole PyPI corpus, which is exactly the
-# "channel should include -alpha/-beta/-rc packages" case reroll's own
-# allow_pre docs (matchspec.md) describe as the intended reason to turn it
-# on -- without it, reroll rejects every pre-release wheel as out of scope
-# before it ever reaches the interpreter/platform checks, which is not what
-# a full-corpus conversion should do by default.
+# Runs reroll's own translator over every outstanding main.db.wheel row
+# (main.db/pypi.db, see reroll_data.reroll_convert's module docstring),
+# writing reroll_data/resolutions/conversion_status/requires_prerelease/
+# reroll_version back per row. Idempotent and resumable like repodata-convert
+# above -- safe to re-run after an interrupted pass, and safe to re-run once
+# converged (a no-op scan). Runs in the ordinary uv env ($(RUN)), not the pixi
+# one: unlike conda_pypi, reroll is a normal, required dependency here, kept
+# current by a plain `uv sync`.
+#
+# Always passes --retry-errors, so every run also re-arms and re-attempts
+# rows left over from a previous non-ok conversion_status -- fine as a no-op
+# when there are none, and means a `pypi_conda_names` curation pass or a
+# reroll fix takes effect on the very next `make reroll-convert` with no
+# separate step. Always passes --retry-stale-version too, so a `py-reroll`
+# upgrade automatically re-attempts every row (including previously-`ok`
+# ones) its own last run's reroll_version disagrees with. Deliberately does
+# *not* pass --allow-pre: the job itself already retries a genuine
+# pre-release rejection with allow_pre=True on its own (see
+# reroll_data.reroll_convert's "Pre-release retry" docstring section) --
+# forcing it on for every wheel up front would just mean paying for a second
+# attempt reroll's own retry logic already limits to the wheels that
+# actually need it.
 reroll-convert:
-	$(RUN) repodata reroll-convert --retry-errors --allow-pre $(REROLL_WORKERS_FLAG) $(LIMIT_FLAG)
+	$(RUN) convert --retry-errors --retry-stale-version $(REROLL_WORKERS_FLAG) $(LIMIT_FLAG)
 
 # --------------------------------------------------------------------------- #
 # diagnostics: run a probe over the corpus (see reroll_data.investigate)

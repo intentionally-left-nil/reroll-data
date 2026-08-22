@@ -141,8 +141,9 @@ No per-file `observed_serial`
     `error_category` column. A `runtime` failure -- reroll's own "says
     nothing about the wheel, stop the batch" category -- is deliberately
     *never* written here; the row is left NULL so it remains in the
-    worklist for a genuine retry once the environment is stable, mirroring
-    `reroll_index_demo.STOP_THE_WORLD_CATEGORIES`.
+    worklist for a genuine retry once the environment is stable -- see
+    `reroll_data.reroll_convert`'s module docstring ("Runtime errors stop
+    the batch").
 
 ``STRICT`` and ``CHECK`` from the start, on every table in both files
     Both require a full table rebuild to add after the fact (SQLite's
