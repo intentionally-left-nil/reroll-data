@@ -125,22 +125,22 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_metadata_sync(args: argparse.Namespace) -> int:
-    db = _db.connect(args.db)
-    _db.init(db)
-    print("reconciling wheel -> wheel_metadata ...", file=sys.stderr)
+    db = _db2.connect_pypi(args.data_dir)
+    _db2.init_pypi(db)
+    print("reconciling pypi_index -> wheel_metadata ...", file=sys.stderr)
     info = _metadata.sync(db)
     if args.release_leases:
         info["released"] = _metadata.release_leases(db, all_leases=True)
     print("sync finished:", file=sys.stderr)
     print(_fmt(info), file=sys.stderr)
-    print(_fmt(_db.metadata_stats(db)), file=sys.stderr)
+    print(_fmt(_metadata.stats(db)), file=sys.stderr)
     db.close()
     return 0
 
 
 def cmd_metadata_fetch(args: argparse.Namespace) -> int:
-    db = _db.connect(args.db)
-    _db.init(db)
+    db = _db2.connect_pypi(args.data_dir)
+    _db2.init_pypi(db)
     tracked = db.execute("SELECT count(*) FROM wheel_metadata").fetchone()[0]
     if tracked == 0:
         db.close()
@@ -164,7 +164,7 @@ def cmd_metadata_fetch(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     out = _metadata.fetch(
-        Path(args.db),
+        args.data_dir,
         workers=args.workers,
         rate_per_minute=args.rate,
         limit=args.limit,
@@ -179,16 +179,16 @@ def cmd_metadata_fetch(args: argparse.Namespace) -> int:
 
 
 def cmd_metadata_status(args: argparse.Namespace) -> int:
-    db = _db.connect(args.db, read_only=True)
-    _db.init(db)
-    print(_fmt(_db.metadata_stats(db, include_bytes=args.bytes)))
+    db = _db2.connect_pypi(args.data_dir, read_only=True)
+    _db2.init_pypi(db)
+    print(_fmt(_metadata.stats(db, include_bytes=args.bytes)))
     db.close()
     return 0
 
 
 def cmd_metadata_show(args: argparse.Namespace) -> int:
     """Print one stored body, so the store can be spot-checked by hand."""
-    db = _db.connect(args.db, read_only=True)
+    db = _db2.connect_pypi(args.data_dir, read_only=True)
     row = db.execute(
         "SELECT b.z_body FROM wheel_metadata wm "
         "JOIN metadata_blob b ON b.sha256 = wm.blob_sha256 "
@@ -381,7 +381,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(_db2.DEFAULT_DATA_DIR),
         help=(
             "directory main.db/pypi.db live under -- used by `db init`, "
-            f"`refresh`, `crawl`, and `sync-consistency` (default: {_db2.DEFAULT_DATA_DIR})"
+            "`refresh`, `crawl`, `sync-consistency`, and `metadata sync`/"
+            f"`fetch`/`status`/`show` (default: {_db2.DEFAULT_DATA_DIR})"
         ),
     )
     sub = p.add_subparsers(dest="command", required=True)
@@ -440,7 +441,7 @@ def build_parser() -> argparse.ArgumentParser:
     msub = m.add_subparsers(dest="metadata_command", required=True)
 
     ms = msub.add_parser(
-        "sync", help="reconcile wheel -> wheel_metadata (idempotent, resumable)"
+        "sync", help="reconcile pypi_index -> wheel_metadata (idempotent, resumable)"
     )
     ms.add_argument(
         "--release-leases",

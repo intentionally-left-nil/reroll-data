@@ -37,13 +37,6 @@ def retry_metadata_conversion(db_path: Path, sha256: str) -> dict:
     failed to decompress, decode, or validate -- the same failure modes
     `_metadata._parse_metadata_json` already logs to stdout).
     """
-    if _metadata.parse_metadata is None:
-        raise RuntimeError(
-            "reroll is not importable in this environment -- install the "
-            "'probe' dependency group (`uv sync --group probe`) before "
-            "running this."
-        )
-
     db = _db.connect(db_path)
     try:
         row = db.execute(

@@ -83,15 +83,6 @@ def backfill_parsed(
     since this is purely CPU-bound local work with no politeness constraint
     towards a remote server, unlike `metadata.fetch`.
     """
-    if _metadata.parse_metadata is None:
-        # Every row would otherwise "fail" identically and get logged/counted
-        # as an error, which is a misleading way to say "wrong environment".
-        raise RuntimeError(
-            "reroll is not importable in this environment -- install the "
-            "'probe' dependency group (`uv sync --group probe`) before "
-            "running the backfill."
-        )
-
     workers = workers or os.process_cpu_count() or os.cpu_count() or 1
 
     # Two connections, one each way, mirroring the single-writer model the

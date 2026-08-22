@@ -29,15 +29,13 @@ duplicated here.
 
 Environment
 -----------
-Unlike conda-pypi, ``reroll`` is an ordinary (if optional) dependency of this
-project -- see ``pyproject.toml``'s ``probe`` dependency group -- so this runs
-from this repo's regular uv environment, no cross-interpreter dance required::
+``reroll`` is a required dependency of this project (see
+``pyproject.toml``'s ``[project.dependencies]``) -- pinned to the published
+PyPI release, distribution name ``py-reroll`` -- so this runs from this
+repo's regular uv environment with no extra sync step::
 
-    uv run --group probe python src/reroll_data/reroll_index_demo.py \\
+    uv run python src/reroll_data/reroll_index_demo.py \\
       six-1.16.0-py2.py3-none-any.whl
-
-(``--group probe`` is redundant if it is already part of your default sync --
-see ``pyproject.toml``'s ``[tool.uv] default-groups``.)
 
 For running this over *every* wheel rather than one at a time, see
 :mod:`reroll_data.reroll_convert`, which reuses this module's
@@ -69,27 +67,14 @@ except ImportError:  # pragma: no cover - running as a standalone script
         _metadata_body,
     )
 
-# `reroll` is an optional dependency (see pyproject.toml's `probe` group) --
-# importing this module (e.g. just to reuse the SQL helpers, or to categorize
-# an error caught elsewhere) must not require it, mirroring
-# `reroll_data.metadata`'s own `parse_metadata` probe.
-try:
-    from reroll.default_mappers import default_mappers
-    from reroll.errors import (
-        RerollInvalidWheelError,
-        RerollRuntimeError,
-        RerollScopeError,
-        RerollUnconvertableError,
-    )
-    from reroll.stages import get_wheel_records, parse_metadata
-except ImportError:  # pragma: no cover - exercised without the `probe` group
-    RerollScopeError = None  # type: ignore[assignment,misc]
-    RerollInvalidWheelError = None  # type: ignore[assignment,misc]
-    RerollUnconvertableError = None  # type: ignore[assignment,misc]
-    RerollRuntimeError = None  # type: ignore[assignment,misc]
-    get_wheel_records = None  # type: ignore[assignment]
-    parse_metadata = None  # type: ignore[assignment]
-    default_mappers = None  # type: ignore[assignment]
+from reroll.default_mappers import default_mappers
+from reroll.errors import (
+    RerollInvalidWheelError,
+    RerollRuntimeError,
+    RerollScopeError,
+    RerollUnconvertableError,
+)
+from reroll.stages import get_wheel_records, parse_metadata
 
 #: Every category :func:`categorize_error` can return. Kept in one place so
 #: `reroll_convert.py`'s progress reporting and this module's own CLI print
@@ -125,19 +110,18 @@ def categorize_error(exc: BaseException) -> str:
     `MetadataUnavailable` -- a wheel this corpus cannot even hand to reroll
     yet (no wheel row, or no PEP 658 METADATA body stored), not something
     reroll itself rejected. Every real `RerollError` leaf reroll raises maps
-    to exactly one of its four documented categories; anything else --
-    including `RerollError` itself being unimportable, i.e. this environment
-    lacks the `probe` dependency group -- falls to `"unexpected"`.
+    to exactly one of its four documented categories; anything else falls to
+    `"unexpected"`.
     """
     if isinstance(exc, (WheelNotFound, MetadataUnavailable)):
         return "unavailable"
-    if RerollScopeError is not None and isinstance(exc, RerollScopeError):
+    if isinstance(exc, RerollScopeError):
         return "scope"
-    if RerollInvalidWheelError is not None and isinstance(exc, RerollInvalidWheelError):
+    if isinstance(exc, RerollInvalidWheelError):
         return "invalid"
-    if RerollUnconvertableError is not None and isinstance(exc, RerollUnconvertableError):
+    if isinstance(exc, RerollUnconvertableError):
         return "unconvertable"
-    if RerollRuntimeError is not None and isinstance(exc, RerollRuntimeError):
+    if isinstance(exc, RerollRuntimeError):
         return "runtime"
     return "unexpected"
 
@@ -185,13 +169,6 @@ def _entry_from_db(
     pre-release wheel version, or a pre-release dependency version, with
     reroll's ordinary `scope`/`unconvertable` errors; `True` accepts both.
     """
-    if get_wheel_records is None or parse_metadata is None:
-        raise RuntimeError(
-            "reroll is not importable in this environment -- install the "
-            "'probe' dependency group (`uv sync --group probe`) before "
-            f"running this. See the {__name__} module docstring."
-        )
-
     (
         _project,
         fn,
@@ -239,10 +216,9 @@ def wheel_to_records(
     version; `True` accepts both.
 
     Raises whatever `get_wheel_records` itself raises -- a `RerollError`
-    leaf, see `reroll.errors` -- for a wheel reroll cannot convert;
-    `WheelNotFound`/`MetadataUnavailable` for the obvious reasons; or
-    `RuntimeError` if `reroll` is not importable in this interpreter. Pass
-    any of these through :func:`format_error` for the same
+    leaf, see `reroll.errors` -- for a wheel reroll cannot convert; or
+    `WheelNotFound`/`MetadataUnavailable` for the obvious reasons. Pass any
+    of these through :func:`format_error` for the same
     `"category: Type: message"` string the batch job stores.
     """
     db = _db.connect(db_path, read_only=True)

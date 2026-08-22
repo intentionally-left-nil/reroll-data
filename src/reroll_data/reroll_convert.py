@@ -20,9 +20,9 @@ have hidden that count entirely.
 Ordinary uv environment, not a second pixi one
 -------------------------------------------------
 Unlike ``conda_pypi`` (a conda plugin, needing the real ``conda``, which is
-not pip-installable), ``reroll`` is an ordinary optional dependency of this
-project -- see ``pyproject.toml``'s ``probe`` group -- so this runs from the
-regular ``uv`` environment (``uv sync --group probe`` once), no pixi
+not pip-installable), ``reroll`` is an ordinary, required dependency of this
+project (see ``pyproject.toml``'s ``[project.dependencies]``), so this runs
+from the regular ``uv`` environment with no extra sync step, no pixi
 environment involved anywhere.
 
 Skipping wheel parsing: hooking into ``reroll.stages``
@@ -253,12 +253,6 @@ def convert(
     a pre-release wheel or dependency version with a `scope`/`unconvertable`
     error; `True` accepts both instead.
 
-    Raises `RuntimeError` immediately, before starting the pool, if `reroll`
-    is not importable -- i.e. the `probe` dependency group was never synced
-    (`uv sync --group probe`). Letting every task discover that
-    independently would just print the same "wrong environment" error
-    `total` times.
-
     Stops early (`interrupted=True`, distinguishable from a real
     `KeyboardInterrupt` via the returned `"runtime_error"` key) the first
     time any wheel fails with reroll's `"runtime"` category -- see the module
@@ -266,13 +260,6 @@ def convert(
     `reroll_error` is deliberately left unwritten, so it is retried (not
     skipped) once the run is retried.
     """
-    if _demo.get_wheel_records is None or _demo.parse_metadata is None:
-        raise RuntimeError(
-            "reroll is not importable in this environment -- install the "
-            "'probe' dependency group (`uv sync --group probe`) before "
-            f"running this. See the {_demo.__name__} module docstring."
-        )
-
     workers = workers or os.process_cpu_count() or os.cpu_count() or 1
 
     # Two connections, one each way, mirroring the single-writer model the

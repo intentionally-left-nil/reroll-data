@@ -13,35 +13,20 @@ dependencies = [
     # pypi-simple, so declared here instead of relied on transitively.
     "requests>=2.32",
     "urllib3>=2.0",
+    # The thing under test, and now a required dependency (not gated behind an
+    # optional group) -- reroll_data.metadata/backfill/retry_metadata_conversion/
+    # reroll_convert/reroll_index_demo all import it unconditionally. Pinned to
+    # the published PyPI release (distribution name `py-reroll`; the importable
+    # module stays `reroll`) rather than a local editable checkout -- reroll is
+    # stable enough now that this repo tracks its released versions instead of
+    # an in-progress ../reroll working tree. Bump this alongside a
+    # `uv lock --upgrade-package py-reroll` when a new release is needed.
+    "py-reroll>=0.4.0",
 ]
 
 [project.scripts]
 reroll-data = "reroll_data.cli:main"
 reroll-investigate = "reroll_data.investigate:main"
-
-# reroll is the thing under test, not a runtime dependency of the scraper: the
-# crawl half of this repo must stay installable without it. Kept in a group so
-# `reroll-data` and `reroll-investigate` can share one environment anyway --
-# reroll needs packaging+pydantic, this repo needs pypi-simple+requests, and
-# neither constrains the other.
-#
-# The distribution is named `py-reroll` (reroll's own `pyproject.toml`
-# `[project.name]`) even though the importable module stays `reroll` --
-# `[tool.uv.build-backend] module-name = "reroll"` there is what makes
-# `from reroll import reroll` keep working unchanged everywhere in this repo.
-[dependency-groups]
-probe = ["py-reroll"]
-
-[tool.uv.sources]
-# Editable, so edits to ../reroll are picked up by the next `reroll-investigate`
-# run with no reinstall. Only a change to *reroll's own dependencies* needs
-# `make sync-probe`. The path assumes reroll is checked out beside this repo;
-# point --python at another environment if it lives elsewhere.
-py-reroll = { path = "../reroll", editable = true }
-
-# Included in the default sync so `uv run reroll-investigate` just works.
-[tool.uv]
-default-groups = ["probe"]
 
 [build-system]
 requires = ["uv_build>=0.12.0,<0.13.0"]
@@ -70,12 +55,12 @@ build-backend = "uv_build"
 #     `conda_pypi_index_demo.py` directly -- see that module's docstring) is
 #     directly runnable from inside it -- no separate entry point to
 #     maintain;
-#   - `reroll`, editable, from a local checkout (not published anywhere,
-#     mirroring `[tool.uv.sources]` above) -- needed transitively because
+#   - `reroll`, pinned to the same published PyPI release as the ordinary uv
+#     env above (`[project.dependencies]`) -- needed transitively because
 #     `reroll_data.cli` imports every subcommand module up front, including
-#     ones (`metadata.py`, `backfill.py`) that probe for `reroll` at import
-#     time. Distribution name `py-reroll`, same caveat as `[tool.uv.sources]`
-#     above -- the importable module stays `reroll`.
+#     ones (`metadata.py`, `backfill.py`) that import `reroll` unconditionally
+#     now that it is a required dependency. Distribution name `py-reroll`; the
+#     importable module stays `reroll`.
 #
 # Reused, never recreated: `pixi install` (or the first `pixi run`) solves and
 # builds this once; every later `pixi run` (including via `make
@@ -95,4 +80,4 @@ conda-pypi = ">=0.11.0"
 
 [tool.pixi.pypi-dependencies]
 reroll-data = { path = ".", editable = true }
-py-reroll = { path = "../reroll", editable = true }
+py-reroll = ">=0.4.0"

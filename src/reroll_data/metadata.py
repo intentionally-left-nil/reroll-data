@@ -2,7 +2,10 @@
 
 Every wheel on PyPI is served alongside a ``<wheel-url>.metadata`` file holding
 its ``METADATA``, and the root index publishes that file's sha256 *before* we
-download it. This module stores those bodies, resumably.
+download it. This module stores those bodies, resumably, into ``pypi.db``
+(:mod:`reroll_data.db2`) -- the source of the worklist is ``pypi_index``
+(populated by :mod:`reroll_data.crawl`), not the legacy ``v.db`` ``wheel``
+table.
 
 Why content addressing
 ----------------------
@@ -12,7 +15,10 @@ the platform and interpreter variants of one release almost always ship byte
 identical metadata. Because the digest is known up front, a body we already hold
 requires **no request at all**, so that 1.50x is a saving in fetches (~3.7M of
 them) as much as in disk. Bodies therefore live in :table:`metadata_blob`, keyed
-by digest, and :table:`wheel_metadata` merely points at them.
+by digest, and :table:`wheel_metadata` merely points at them. Both digests
+(``pypi_index.metadata_sha256`` and ``metadata_blob.sha256``/
+``wheel_metadata.blob_sha256``) are raw 32-byte BLOBs in this schema, not hex
+text -- see :mod:`reroll_data.db2`.
 
 The state machine
 -----------------
@@ -35,16 +41,19 @@ retried forever.
 
 Idempotency
 -----------
-:func:`sync` reconciles ``wheel`` into ``wheel_metadata`` and is a no-op once
-converged, so follow-up runs cost one pass rather than re-fetching anything.
-Staleness is detected the same way :mod:`reroll_data.crawl` does it -- by
-comparing what we stored against what the index now advertises::
+:func:`sync` reconciles ``pypi_index`` into ``wheel_metadata`` and is a no-op
+once converged, so follow-up runs cost one pass rather than re-fetching
+anything. Staleness is detected the same way :mod:`reroll_data.crawl` does it
+-- by comparing what we stored against what the index now advertises::
 
-    wheel_metadata.blob_sha256 <> wheel.metadata_sha256
+    wheel_metadata.blob_sha256 <> pypi_index.metadata_sha256
 
-This tolerates ``crawl`` running concurrently: new wheel rows simply appear as
-``todo`` on the next sync, and a wheel whose metadata was replaced upstream
-returns to ``todo`` automatically.
+This tolerates ``crawl`` running concurrently: new ``pypi_index`` rows simply
+appear as ``todo`` on the next sync, and a wheel whose metadata was replaced
+upstream returns to ``todo`` automatically. ``filename`` alone is the join key
+(and ``wheel_metadata``'s own primary key) -- PyPI's filename namespace is
+already global, same reasoning as ``pypi_index``/``main.wheel`` in
+:mod:`reroll_data.db2`.
 
 Rate limiting
 -------------
@@ -73,18 +82,22 @@ from pathlib import Path
 
 import requests
 
+import reroll
+from reroll.wheel_metadata import parse_metadata
+
 from . import crawl as _crawl
-from . import db as _db
+from . import db2 as _db2
 from .ratelimit import TokenBucket
 
-# `reroll` is an optional dependency (see pyproject.toml's `probe` group) --
-# the crawl/metadata pipeline must keep working without it. When present,
-# every newly-fetched body gets parsed into `metadata_blob.parsed_json`;
-# otherwise that column is simply left NULL for new rows too.
-try:
-    from reroll.wheel_metadata import parse_metadata
-except ImportError:  # pragma: no cover - exercised by installs without `reroll`
-    parse_metadata = None  # type: ignore[assignment]
+#: `reroll.__version__` (itself `importlib.metadata.version("py-reroll")`),
+#: captured once at import time rather than re-read per row. `reroll` is a
+#: required dependency (see pyproject.toml -- sourced from PyPI as
+#: `py-reroll` rather than a local checkout now that it is stable enough to
+#: pin a release), so this is never None. Every newly-*parsed* body gets
+#: stored into `metadata_blob.parsed_json`, tagged with the parser version
+#: that produced it (`wheel_metadata.parser_version`, set only for the row
+#: that actually ran the parser -- see `fetch`'s worker).
+PARSER_VERSION: str = reroll.__version__
 
 #: zlib level. 6 measured 2.81x on real bodies; 9 gained 0.1% for ~4x the CPU.
 ZLIB_LEVEL = 6
@@ -98,17 +111,25 @@ class Result:
     filename: str
     #: done | missing | error | todo  ('todo' releases the lease for a retry)
     status: str
-    sha256: str | None = None
+    #: Raw 32-byte digest (`metadata_blob.sha256`/`wheel_metadata.blob_sha256`
+    #: are BLOB columns in `pypi.db` -- see `reroll_data.db2`), not hex text.
+    sha256: bytes | None = None
     z_body: bytes | None = None
     n_bytes: int = 0
     error: str | None = None
     #: True when the body was already held, so no request was made.
     deduped: bool = False
     #: JSON text from `reroll.wheel_metadata.parse_metadata`, or None when
-    #: `reroll` is unavailable, the body failed to decode/parse, or (for a
-    #: deduped hit) there was no freshly-fetched body to parse in the first
-    #: place -- the existing `metadata_blob` row is left untouched either way.
+    #: the body failed to decode/parse, or (for a deduped hit) there was no
+    #: freshly-fetched body to parse in the first place -- the existing
+    #: `metadata_blob` row is left untouched either way.
     parsed_json: str | None = None
+    #: `PARSER_VERSION` at the moment `parsed_json` above was produced by
+    #: *this* fetch, or None whenever `parsed_json` is None (including a
+    #: deduped hit, which never runs the parser -- see `wheel_metadata`'s
+    #: schema comment in `reroll_data.db2` for why this is denormalized onto
+    #: this row rather than onto the shared `metadata_blob` one).
+    parser_version: str | None = None
 
 
 def _parse_metadata_json(body: bytes, *, context: str) -> str | None:
@@ -125,8 +146,6 @@ def _parse_metadata_json(body: bytes, *, context: str) -> str | None:
     visible on the console during a run rather than only discoverable later
     via `SELECT count(*) ... WHERE parsed_json IS NULL`.
     """
-    if parse_metadata is None:
-        return None
     try:
         text = body.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -154,49 +173,53 @@ def _parse_metadata_json(body: bytes, *, context: str) -> str | None:
 # with the SELECT's own clauses). The only constraint on the table that OR
 # IGNORE could mask is the primary key, which is exactly what we want skipped.
 #
-# Both tables are keyed (project, filename) and stored in that order, so this
-# walks the two B-trees in lockstep instead of probing randomly.
+# Both tables are keyed by `filename` alone (PyPI's filename namespace is
+# already global -- see `reroll_data.db2`'s module docstring) and stored in
+# that order, so this walks the two B-trees in lockstep instead of probing
+# randomly.
 _SYNC_INSERT = """
-INSERT OR IGNORE INTO wheel_metadata(project, filename, state, updated_at)
-SELECT project,
-       filename,
+INSERT OR IGNORE INTO wheel_metadata(filename, project, state, updated_at)
+SELECT filename,
+       project,
        -- A null digest means the index advertises no sidecar; verified against
        -- PyPI, those URLs 404. Recording 'missing' up front spends no request.
        CASE WHEN metadata_sha256 IS NULL THEN 'missing' ELSE 'todo' END,
        ?
-FROM wheel
+FROM pypi_index
 """
 
 # Re-open rows the index now disagrees with. coalesce() makes one statement
 # cover both directions: a 'done' row whose digest changed upstream, and a
-# 'missing' row that has since gained a sidecar.
+# 'missing' row that has since gained a sidecar. Both digests are BLOBs, so
+# the sentinel is a zero-length blob (`X''`) rather than an empty string.
 _SYNC_STALE = """
 UPDATE wheel_metadata AS wm
    SET state = 'todo', blob_sha256 = NULL, attempts = 0, error = NULL,
-       lease_until = NULL, updated_at = ?
-  FROM wheel AS w
- WHERE w.project = wm.project
-   AND w.filename = wm.filename
+       lease_until = NULL, parser_version = NULL, updated_at = ?
+  FROM pypi_index AS p
+ WHERE p.filename = wm.filename
    AND wm.state IN ('done', 'missing')
-   AND coalesce(wm.blob_sha256, '') <> coalesce(w.metadata_sha256, '')
+   AND coalesce(wm.blob_sha256, X'') <> coalesce(p.metadata_sha256, X'')
 """
 
 # The payoff: anything whose digest we already hold is finished without a
 # request. On a converged database this matches nothing and costs one pass.
+# `parser_version` is deliberately left untouched here (NULL for a
+# newly-linked row): linking never runs the parser itself, so there is
+# nothing this row's own fetch attempt can honestly claim -- see `Result`.
 _SYNC_LINK = """
 UPDATE wheel_metadata AS wm
-   SET state = 'done', blob_sha256 = w.metadata_sha256, error = NULL,
+   SET state = 'done', blob_sha256 = p.metadata_sha256, error = NULL,
        lease_until = NULL, updated_at = ?
-  FROM wheel AS w
- WHERE w.project = wm.project
-   AND w.filename = wm.filename
+  FROM pypi_index AS p
+ WHERE p.filename = wm.filename
    AND wm.state = 'todo'
-   AND EXISTS (SELECT 1 FROM metadata_blob b WHERE b.sha256 = w.metadata_sha256)
+   AND EXISTS (SELECT 1 FROM metadata_blob b WHERE b.sha256 = p.metadata_sha256)
 """
 
 
 def sync(db: sqlite3.Connection) -> dict[str, int]:
-    """Reconcile `wheel` into `wheel_metadata`. Safe to re-run; converges."""
+    """Reconcile `pypi_index` into `wheel_metadata`. Safe to re-run; converges."""
     now = int(time.time())
     out: dict[str, int] = {}
     # Each statement commits separately so the WAL can checkpoint in between --
@@ -268,6 +291,42 @@ def reset_errors(db: sqlite3.Connection) -> int:
     return n
 
 
+def stats(db: sqlite3.Connection, *, include_bytes: bool = False) -> dict[str, int]:
+    """Counts for the metadata state machine, against `pypi.db`.
+
+    `wheel_metadata.state` and `metadata_blob`'s own columns are unchanged
+    in shape between the legacy `v.db` schema and this one -- only the
+    surrounding tables (`pypi_index` vs `wheel`) and the two content
+    digests' storage type (BLOB here, hex TEXT there) differ -- so this is
+    the same query `reroll_data.db.metadata_stats` ran, just against a
+    `pypi.db` connection instead.
+
+    `include_bytes` is opt-in because summing over `metadata_blob` has to
+    walk every leaf page of a table that grows to tens of GB, which takes
+    minutes. The state counts come from a much smaller index and stay
+    quick, so progress can be checked cheaply during a multi-day run.
+    """
+    q = lambda sql: db.execute(sql).fetchone()[0]  # noqa: E731
+    by_state = dict(
+        db.execute("SELECT state, count(*) FROM wheel_metadata GROUP BY state")
+    )
+    out = {
+        "tracked": sum(by_state.values()),
+        "todo": by_state.get("todo", 0),
+        "lease": by_state.get("lease", 0),
+        "done": by_state.get("done", 0),
+        "missing": by_state.get("missing", 0),
+        "error": by_state.get("error", 0),
+        "blobs": q("SELECT count(*) FROM metadata_blob"),
+    }
+    if include_bytes:
+        out["blob_bytes_z"] = q(
+            "SELECT coalesce(sum(length(z_body)), 0) FROM metadata_blob"
+        )
+        out["blob_bytes_raw"] = q("SELECT coalesce(sum(n_bytes), 0) FROM metadata_blob")
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # claiming
 # --------------------------------------------------------------------------- #
@@ -279,12 +338,15 @@ def reset_errors(db: sqlite3.Connection) -> int:
 # recovered by :func:`release_leases` when a claim comes back empty, rather
 # than by widening this predicate.
 #
-# `wheel` is joined in for the URL and the expected digest.
+# `pypi_index` is joined in for the URL (folded into its JSONB
+# `pypi_metadata` -- see `reroll_data.db2`'s module docstring -- so pulled
+# out here with the `->>` operator, which works directly against a JSONB
+# blob column) and the expected digest.
 _CLAIM_SELECT = """
-SELECT wm.project, wm.filename, w.url, w.metadata_sha256, wm.attempts
+SELECT wm.project, wm.filename, p.pypi_metadata ->> 'url', p.metadata_sha256, wm.attempts
   FROM wheel_metadata AS wm
-  JOIN wheel AS w
-    ON w.project = wm.project AND w.filename = wm.filename
+  JOIN pypi_index AS p
+    ON p.filename = wm.filename
  WHERE wm.state = 'todo'
    AND wm.attempts < ?
  LIMIT ?
@@ -310,8 +372,8 @@ def _claim(
             db.executemany(
                 "UPDATE wheel_metadata SET state = 'lease', lease_until = ?, "
                 "attempts = attempts + 1, updated_at = ? "
-                "WHERE project = ? AND filename = ?",
-                [(now + lease_seconds, now, r[0], r[1]) for r in rows],
+                "WHERE filename = ?",
+                [(now + lease_seconds, now, r[1]) for r in rows],
             )
         db.execute("COMMIT")
     except BaseException:
@@ -326,7 +388,7 @@ def _claim(
 
 
 def fetch_one(
-    sess: requests.Session, url: str, want_sha: str | None
+    sess: requests.Session, url: str, want_sha: bytes | None
 ) -> tuple[str, bytes | None, str | None]:
     """Download one sidecar. Returns (status, body, error)."""
     resp = sess.get(url + ".metadata", timeout=(10, 60))
@@ -336,11 +398,15 @@ def fetch_one(
         return "missing", None, None
     resp.raise_for_status()
     body = resp.content
-    got = hashlib.sha256(body).hexdigest()
+    got = hashlib.sha256(body).digest()
     if want_sha is not None and got != want_sha:
         # Refuse to store a body under a digest that does not describe it --
         # that would silently corrupt the content-addressed store.
-        return "error", None, f"sha256 mismatch: want {want_sha} got {got}"
+        return (
+            "error",
+            None,
+            f"sha256 mismatch: want {want_sha.hex()} got {got.hex()}",
+        )
     return "done", body, None
 
 
@@ -350,7 +416,7 @@ def fetch_one(
 
 
 def _writer(
-    db_path: Path,
+    data_dir: Path | str,
     results: queue.Queue,
     counters: dict,
     lock: threading.Lock,
@@ -358,7 +424,8 @@ def _writer(
     flush_interval: float,
 ) -> None:
     """Sole writer. SQLite permits one writer, so all mutations funnel here."""
-    db = _db.connect(db_path)
+    db = _db2.connect_pypi(data_dir)
+    _db2.init_pypi(db)
     pending: list[Result] = []
     last_flush = time.monotonic()
 
@@ -377,22 +444,25 @@ def _writer(
                     # results in this batch sharing a digest collapse here --
                     # DO NOTHING is fine since parse_metadata is deterministic
                     # over the same body, so whichever result wins carries the
-                    # same parsed_json either way.
+                    # same parsed_json either way. parsed_json is JSONB (see
+                    # `reroll_data.db2`) -- wrapped with `jsonb(?)`, which
+                    # passes a NULL argument through as NULL rather than
+                    # erroring, so a failed/skipped parse still stores fine.
                     db.execute(
                         "INSERT INTO metadata_blob(sha256, n_bytes, z_body, stored_at, parsed_json) "
-                        "VALUES(?,?,?,?,?) ON CONFLICT(sha256) DO NOTHING",
+                        "VALUES(?,?,?,?,jsonb(?)) ON CONFLICT(sha256) DO NOTHING",
                         (res.sha256, res.n_bytes, res.z_body, now, res.parsed_json),
                     )
                 db.execute(
                     "UPDATE wheel_metadata SET state = ?, blob_sha256 = ?, "
-                    "error = ?, lease_until = NULL, updated_at = ? "
-                    "WHERE project = ? AND filename = ?",
+                    "error = ?, parser_version = ?, lease_until = NULL, updated_at = ? "
+                    "WHERE filename = ?",
                     (
                         res.status,
                         res.sha256 if res.status == "done" else None,
                         res.error,
+                        res.parser_version if res.status == "done" else None,
                         now,
-                        res.project,
                         res.filename,
                     ),
                 )
@@ -438,7 +508,7 @@ def _writer(
 
 
 def fetch(
-    db_path: Path,
+    data_dir: Path | str,
     *,
     workers: int = 8,
     rate_per_minute: float = 900.0,
@@ -476,7 +546,7 @@ def fetch(
 
     writer = threading.Thread(
         target=_writer,
-        args=(db_path, results, counters, lock, batch_size, flush_interval),
+        args=(data_dir, results, counters, lock, batch_size, flush_interval),
         name="writer",
         daemon=True,
     )
@@ -484,7 +554,7 @@ def fetch(
 
     def feeder() -> None:
         """Claim batches and refill the work queue until nothing is left."""
-        db = _db.connect(db_path)
+        db = _db2.connect_pypi(data_dir)
         claimed = 0
         try:
             while not stop.is_set():
@@ -525,7 +595,7 @@ def fetch(
         # go -- without this probe the first run would make ~3.7M needless
         # requests. An indexed read is many orders of magnitude cheaper, and it
         # only ever sees committed rows, so a 'done' pointer is never dangling.
-        probe = _db.connect(db_path, read_only=True)
+        probe = _db2.connect_pypi(data_dir, read_only=True)
         try:
             while not stop.is_set():
                 item = work.get()
@@ -581,16 +651,23 @@ def fetch(
                     )
                 else:
                     if status == "done":
+                        parsed_json = _parse_metadata_json(
+                            body, context=f"{project}/{filename}"
+                        )
                         results.put(
                             Result(
                                 project,
                                 filename,
                                 "done",
-                                sha256=hashlib.sha256(body).hexdigest(),
+                                sha256=hashlib.sha256(body).digest(),
                                 z_body=zlib.compress(body, ZLIB_LEVEL),
                                 n_bytes=len(body),
-                                parsed_json=_parse_metadata_json(
-                                    body, context=f"{project}/{filename}"
+                                parsed_json=parsed_json,
+                                # Only claimed when this run's own parse
+                                # actually produced parsed_json -- see
+                                # `Result.parser_version`.
+                                parser_version=(
+                                    PARSER_VERSION if parsed_json is not None else None
                                 ),
                             )
                         )

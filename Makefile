@@ -43,9 +43,9 @@ CONVERT_WORKERS ?=
 
 # reroll-convert (see reroll_data.reroll_convert): purely local CPU work like
 # repodata-convert above, but runs in the ordinary uv venv, not the pixi one
-# -- `reroll` (unlike `conda_pypi`) is an ordinary optional dependency, see
-# `sync-probe` below. Left empty by default so the tool's own default (all
-# cores) applies, e.g. `make reroll-convert REROLL_WORKERS=4`.
+# -- `reroll` (unlike `conda_pypi`) is an ordinary, required dependency, kept
+# current by a plain `uv sync`. Left empty by default so the tool's own
+# default (all cores) applies, e.g. `make reroll-convert REROLL_WORKERS=4`.
 REROLL_WORKERS ?=
 
 RUN        := uv run reroll-data --db $(DB) --data-dir $(DATA_DIR)
@@ -70,7 +70,7 @@ REROLL_WORKERS_FLAG = $(if $(REROLL_WORKERS),--workers $(REROLL_WORKERS),)
 	retry-metadata-conversion \
 	repodata-status sync-repodata repodata-convert-env repodata-convert reroll-convert \
 	reroll-status \
-	investigate sync-probe
+	investigate
 
 help:
 	@echo "Targets (override DB, RATE, WORKERS, LIMIT as needed):"
@@ -94,7 +94,6 @@ help:
 	@echo "Diagnostics (override PROBE, OUT, PACKAGE, LIMIT, PWORKERS):"
 	@echo "  probes:           $(shell ls probes/*.py 2>/dev/null | xargs -n1 basename | sed 's/\.py$$//' | tr '\n' ' ')"
 	@echo "  investigate       probe every wheel, write $(OUT)"
-	@echo "  sync-probe        reinstall ../reroll (only needed if its deps changed)"
 
 status:
 	$(RUN) status
@@ -167,9 +166,10 @@ metadata-sync:
 metadata-fetch:
 	$(RUN) metadata fetch --rate $(RATE) --workers $(WORKERS) $(LIMIT_FLAG)
 
-# sync reconciles wheel -> wheel_metadata (picks up anything crawl just added,
-# and is a no-op once converged); fetch then drains it. Both idempotent and
-# resumable -- safe to re-run after an interrupted fetch.
+# sync reconciles pypi_index -> wheel_metadata (picks up anything crawl just
+# added, and is a no-op once converged); fetch then drains it. Both idempotent
+# and resumable -- safe to re-run after an interrupted fetch. Both write to
+# pypi.db (DATA_DIR), not the legacy v.db (DB).
 sync-metadata:
 	$(RUN) metadata sync
 	$(RUN) metadata fetch --rate $(RATE) --workers $(WORKERS) $(LIMIT_FLAG)
@@ -229,7 +229,8 @@ repodata-convert: repodata-convert-env
 # resumable like repodata-convert above -- safe to re-run after an
 # interrupted pass, and safe to re-run once converged (a no-op scan). Runs in
 # the ordinary uv env ($(RUN)), not the pixi one: unlike conda_pypi, reroll
-# is a normal (if optional) dependency here -- see `sync-probe`. Always
+# is a normal, required dependency here, kept current by a plain `uv sync`.
+# Always
 # passes --retry-errors, so every run also re-arms and re-attempts rows left
 # over from a previous reroll_error -- fine as a no-op when there are none,
 # and means a reroll fix takes effect on the very next `make reroll-convert`
@@ -250,8 +251,3 @@ reroll-convert:
 investigate:
 	$(INVESTIGATE) --probe $(PROBE) -o $(OUT) --workers $(PWORKERS) \
 		$(LIMIT_FLAG) $(PKG_FLAG)
-
-# ../reroll is installed editable, so ordinary source edits need nothing. This
-# is only for when reroll's own dependencies change.
-sync-probe:
-	uv sync --group probe
