@@ -428,15 +428,14 @@ class Fetcher:
 # given filename is immutable once served, so both upserts below are
 # conditioned on `yanked` actually differing: a re-crawl of an already-known,
 # never-yanked wheel touches neither table, rather than rewriting an
-# identical row (and bumping `last_seen`) on every pass.
+# identical row on every pass.
 _INSERT_PYPI_INDEX = """
-INSERT INTO pypi_index(filename, project, yanked, metadata_sha256, pypi_metadata, first_seen, last_seen)
-VALUES (?, ?, ?, ?, jsonb(?), ?, ?)
+INSERT INTO pypi_index(filename, project, yanked, metadata_sha256, pypi_metadata)
+VALUES (?, ?, ?, ?, jsonb(?))
 ON CONFLICT(filename) DO UPDATE SET
     yanked          = excluded.yanked,
     metadata_sha256 = excluded.metadata_sha256,
-    pypi_metadata   = excluded.pypi_metadata,
-    last_seen       = excluded.last_seen
+    pypi_metadata   = excluded.pypi_metadata
 WHERE pypi_index.yanked <> excluded.yanked
 """
 
@@ -523,8 +522,6 @@ def _writer(
                                     int(w.yanked),
                                     w.metadata_sha256,
                                     w.pypi_metadata,
-                                    now,
-                                    now,
                                 )
                                 for w in res.wheels
                             ],

@@ -103,6 +103,23 @@ Column promoted vs. folded into a JSONB blob: filtered-or-joined-on, or not
     `yanked_reason`, `has_metadata`, and any as-yet-unmodelled PEP 691 keys
     all live inside `pypi_metadata` instead.
 
+No `first_seen`/`last_seen` on `pypi_index`
+    The initial schema carried these over from the legacy `v.db.wheel`
+    table, but nothing in this codebase ever reads either one -- no
+    `SELECT`, `WHERE`, or stats query touches them, only the crawl's own
+    insert/upsert. `last_seen` in particular stopped meaning "last time we
+    crawled this file" once the incremental upsert (`crawl.py`'s
+    `_INSERT_PYPI_INDEX`) was conditioned on `yanked` actually differing --
+    a re-crawl of an unchanged wheel touches neither column, so it really
+    means "last time `yanked` changed." The mechanism these two columns
+    would support -- staleness-based removal of a wheel/project nothing has
+    "seen" in a while -- is exactly what "Deletions, not a 'gone' status"
+    (`crawl.py`'s module docstring) replaced with an explicit diff against
+    the root index. Per the "filtered-or-joined-on" rule directly above,
+    that leaves both columns with no functional justification, so they were
+    dropped (`ALTER TABLE pypi_index DROP COLUMN ...`) rather than kept as
+    unused metadata.
+
 No per-file `observed_serial`
     `__last_serial` is project-granular (PEP 700), not per-file, and the
     crawler already writes every file of one project plus that project's
@@ -301,9 +318,7 @@ CREATE TABLE IF NOT EXISTS pypi_index (
     -- provenance_url, any non-sha256 hashes, and whatever PEP 691 keys this
     -- version does not (yet) model explicitly. Read only ever after the row
     -- has already been located by `filename`; never filtered on directly.
-    pypi_metadata   BLOB CHECK (pypi_metadata IS NULL OR json_valid(pypi_metadata, 8)),
-    first_seen      INTEGER,
-    last_seen       INTEGER
+    pypi_metadata   BLOB CHECK (pypi_metadata IS NULL OR json_valid(pypi_metadata, 8))
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS pypi_index_project
@@ -505,7 +520,6 @@ _PYPI_EXPECTED_COLUMNS = {
     },
     "pypi_index": {
         "filename", "project", "yanked", "metadata_sha256", "pypi_metadata",
-        "first_seen", "last_seen",
     },
     "wheel_metadata": {
         "filename", "project", "state", "blob_sha256", "lease_until",

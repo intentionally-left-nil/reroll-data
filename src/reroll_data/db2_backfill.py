@@ -421,7 +421,7 @@ _SKIP_GONE_PROJECT = "EXISTS (SELECT 1 FROM project p WHERE p.name = wheel.proje
 _WHEEL_SELECT = f"""
 SELECT project, filename, url, size, upload_time, requires_python, sha256,
        hashes_json, yanked, yanked_reason, has_metadata, metadata_sha256,
-       provenance_url, extra_json, first_seen, last_seen
+       provenance_url, extra_json
   FROM wheel
  WHERE (project, filename) > (?, ?)
    AND NOT {_SKIP_GONE_PROJECT}
@@ -430,8 +430,8 @@ SELECT project, filename, url, size, upload_time, requires_python, sha256,
 """
 
 _PYPI_INDEX_INSERT = """
-INSERT INTO pypi_index (filename, project, yanked, metadata_sha256, pypi_metadata, first_seen, last_seen)
-VALUES (?, ?, ?, ?, jsonb(?), ?, ?)
+INSERT INTO pypi_index (filename, project, yanked, metadata_sha256, pypi_metadata)
+VALUES (?, ?, ?, ?, jsonb(?))
 """
 
 # ON CONFLICT(filename) DO NOTHING, not OR IGNORE -- see the module
@@ -506,7 +506,7 @@ def migrate_wheel(
                 for (
                     project, filename, _url, _size, _upload_time, _requires_python,
                     _sha256, _hashes_json, yanked, _yanked_reason, _has_metadata,
-                    _metadata_sha256, _provenance_url, _extra_json, _first_seen, _last_seen,
+                    _metadata_sha256, _provenance_url, _extra_json,
                 ) in rows
             ]
             main_db.execute("BEGIN IMMEDIATE")
@@ -530,13 +530,11 @@ def migrate_wheel(
                         has_metadata=has_metadata, provenance_url=provenance_url,
                         extra_json=extra_json,
                     ),
-                    first_seen,
-                    last_seen,
                 )
                 for (
                     project, filename, url, size, upload_time, requires_python,
                     sha256, hashes_json, yanked, yanked_reason, has_metadata,
-                    metadata_sha256, provenance_url, extra_json, first_seen, last_seen,
+                    metadata_sha256, provenance_url, extra_json,
                 ) in rows
             ]
             pypi_db.execute("BEGIN IMMEDIATE")

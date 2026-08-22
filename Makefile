@@ -117,7 +117,7 @@ reroll-status:
 # not touch the existing v.db every other target here uses; this is purely
 # additive as part of the migration to the new schema.
 db-init:
-	$(RUN) db init --data-dir $(DATA_DIR)
+	$(RUN) db init
 
 # One-off, idempotent, resumable (see reroll_data.db2_backfill): copies the
 # pypi-index/metadata halves of the legacy v.db corpus into main.db/pypi.db.
