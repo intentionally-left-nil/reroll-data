@@ -2,6 +2,12 @@
 DB      ?= data/v.db
 RATE    ?= 1800
 WORKERS ?= 12
+
+# db-init (see reroll_data.db2): directory main.db/pypi.db are created under,
+# alongside the legacy v.db above -- separate from DB since db2 is a
+# per-database, not a single-file, schema. Defaults to the same directory
+# `data/v.db` lives in.
+DATA_DIR ?= data
 # Set to cap a run, e.g. `make crawl LIMIT=500`, so a step can be tried at
 # small scale before being let loose on the full corpus.
 LIMIT   ?=
@@ -58,6 +64,7 @@ CONVERT_WORKERS_FLAG = $(if $(CONVERT_WORKERS),--workers $(CONVERT_WORKERS),)
 REROLL_WORKERS_FLAG = $(if $(REROLL_WORKERS),--workers $(REROLL_WORKERS),)
 
 .PHONY: help status \
+	db-init \
 	refresh crawl sync-filenames \
 	metadata-status metadata-sync metadata-fetch sync-metadata metadata-backfill \
 	retry-metadata-conversion \
@@ -67,6 +74,7 @@ REROLL_WORKERS_FLAG = $(if $(REROLL_WORKERS),--workers $(REROLL_WORKERS),)
 
 help:
 	@echo "Targets (override DB, RATE, WORKERS, LIMIT as needed):"
+	@echo "  db-init           create main.db/pypi.db (new per-database schema, see reroll_data.db2)"
 	@echo "  sync-filenames    refresh + crawl -- discover and fetch .whl filenames"
 	@echo "  sync-metadata     metadata sync + fetch -- download METADATA bodies"
 	@echo "  sync-repodata     reconcile wheel -> repodata_conversion (local, no network)"
@@ -97,6 +105,18 @@ repodata-status:
 
 reroll-status:
 	$(RUN) repodata reroll-status
+
+# --------------------------------------------------------------------------- #
+# db: create main.db/pypi.db, the new per-database schema (see reroll_data.db2)
+# --------------------------------------------------------------------------- #
+
+# One-off / idempotent: creates main.db and pypi.db under DATA_DIR if missing,
+# and only verifies (never alters or drops) either one if it already exists --
+# see reroll_data.db2's module docstring and SchemaMismatch. Deliberately does
+# not touch the existing v.db every other target here uses; this is purely
+# additive as part of the migration to the new schema.
+db-init:
+	$(RUN) db init --data-dir $(DATA_DIR)
 
 # --------------------------------------------------------------------------- #
 # filenames: discover every .whl on PyPI (see reroll_data.crawl)

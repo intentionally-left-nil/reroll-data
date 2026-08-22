@@ -11,6 +11,7 @@ from pathlib import Path
 from . import backfill as _backfill
 from . import crawl as _crawl
 from . import db as _db
+from . import db2 as _db2
 from . import metadata as _metadata
 from . import repodata_convert as _repodata_convert
 from . import repodata_sync as _repodata_sync
@@ -20,6 +21,29 @@ from . import retry_metadata_conversion as _retry_metadata_conversion
 
 def _fmt(stats: dict) -> str:
     return "  " + "\n  ".join(f"{k:<16} {v:>12,}" for k, v in stats.items())
+
+
+def cmd_db_init(args: argparse.Namespace) -> int:
+    """Create `main.db`/`pypi.db` (the new per-database schema) if missing.
+
+    Deliberately separate from the legacy `--db`/`reroll_data.db` (`v.db`)
+    machinery every other command uses -- see `reroll_data.db2`'s module
+    docstring. Non-destructive: `db2.init_main`/`init_pypi` only ever run
+    `CREATE TABLE/INDEX IF NOT EXISTS` against an existing file, and raise
+    `SchemaMismatch` instead of altering a table whose shape has drifted.
+    """
+    try:
+        _db2.init_all(args.data_dir)
+    except _db2.SchemaMismatch as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    data_dir = Path(args.data_dir)
+    print(
+        f"initialized {data_dir / _db2.MAIN_DB_FILENAME} and "
+        f"{data_dir / _db2.PYPI_DB_FILENAME}",
+        file=sys.stderr,
+    )
+    return 0
 
 
 def cmd_refresh(args: argparse.Namespace) -> int:
@@ -331,6 +355,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="User-Agent to identify this crawler to PyPI",
     )
     sub = p.add_subparsers(dest="command", required=True)
+
+    d = sub.add_parser(
+        "db",
+        help="manage main.db/pypi.db -- the new per-database schema (reroll_data.db2)",
+    )
+    dsub = d.add_subparsers(dest="db_command", required=True)
+
+    di = dsub.add_parser(
+        "init",
+        help="create main.db and pypi.db if missing (non-destructive; leaves v.db alone)",
+    )
+    di.add_argument(
+        "--data-dir",
+        default=str(_db2.DEFAULT_DATA_DIR),
+        help=(
+            "directory to create main.db/pypi.db under "
+            f"(default: {_db2.DEFAULT_DATA_DIR})"
+        ),
+    )
+    di.set_defaults(func=cmd_db_init)
 
     r = sub.add_parser(
         "refresh",
