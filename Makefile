@@ -64,7 +64,7 @@ CONVERT_WORKERS_FLAG = $(if $(CONVERT_WORKERS),--workers $(CONVERT_WORKERS),)
 REROLL_WORKERS_FLAG = $(if $(REROLL_WORKERS),--workers $(REROLL_WORKERS),)
 
 .PHONY: help status \
-	db-init \
+	db-init db2-backfill \
 	refresh crawl sync-filenames \
 	metadata-status metadata-sync metadata-fetch sync-metadata metadata-backfill \
 	retry-metadata-conversion \
@@ -75,6 +75,7 @@ REROLL_WORKERS_FLAG = $(if $(REROLL_WORKERS),--workers $(REROLL_WORKERS),)
 help:
 	@echo "Targets (override DB, RATE, WORKERS, LIMIT as needed):"
 	@echo "  db-init           create main.db/pypi.db (new per-database schema, see reroll_data.db2)"
+	@echo "  db2-backfill      one-off: migrate v.db's pypi index/metadata into main.db/pypi.db (resumable)"
 	@echo "  sync-filenames    refresh + crawl -- discover and fetch .whl filenames"
 	@echo "  sync-metadata     metadata sync + fetch -- download METADATA bodies"
 	@echo "  sync-repodata     reconcile wheel -> repodata_conversion (local, no network)"
@@ -117,6 +118,14 @@ reroll-status:
 # additive as part of the migration to the new schema.
 db-init:
 	$(RUN) db init --data-dir $(DATA_DIR)
+
+# One-off, idempotent, resumable (see reroll_data.db2_backfill): copies the
+# pypi-index/metadata halves of the legacy v.db corpus into main.db/pypi.db.
+# Never touches v.db (read-only); never copies reroll_data/repodata_conversion
+# or metadata_blob.parsed_json -- see that module's docstring. Safe to
+# interrupt and re-run; each step picks up exactly where it left off.
+db2-backfill:
+	uv run python -m reroll_data.db2_backfill --db $(DB) --data-dir $(DATA_DIR) $(LIMIT_FLAG)
 
 # --------------------------------------------------------------------------- #
 # filenames: discover every .whl on PyPI (see reroll_data.crawl)
