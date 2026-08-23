@@ -123,15 +123,16 @@ sync-metadata:
 
 # Runs reroll's own translator over every outstanding main.db.wheel row
 # (main.db/pypi.db, see reroll_data.reroll_convert's module docstring),
-# writing reroll_data/resolutions/conversion_status/requires_prerelease/
-# reroll_version back per row. Idempotent and resumable -- safe to re-run
-# after an interrupted pass, and safe to re-run once converged (a no-op
-# scan). Runs in the ordinary uv env ($(RUN)): reroll is a normal, required
-# dependency here, kept current by a plain `uv sync`.
+# writing reroll_data/resolutions/requires_prerelease/reroll_version back
+# per row, plus a main.db.reroll_errors row for a failure. Idempotent and
+# resumable -- safe to re-run after an interrupted pass, and safe to re-run
+# once converged (a no-op scan). Runs in the ordinary uv env ($(RUN)):
+# reroll is a normal, required dependency here, kept current by a plain
+# `uv sync`.
 #
 # Always passes --retry-errors, so every run also re-arms and re-attempts
-# rows left over from a previous non-ok conversion_status -- fine as a no-op
-# when there are none, and means a `pypi_conda_names` curation pass or a
+# every wheel with a settled (non-runtime) reroll_errors row -- fine as a
+# no-op when there are none, and means a `pypi_conda_names` curation pass or a
 # reroll fix takes effect on the very next `make reroll-convert` with no
 # separate step. Always passes --retry-stale-version too, so a `py-reroll`
 # upgrade automatically re-attempts every row (including previously-`ok`

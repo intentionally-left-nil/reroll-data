@@ -133,17 +133,48 @@ No per-file `observed_serial`
     project.crawled_serial` remains the one staleness signal, unchanged
     from the legacy ``v.db`` schema this replaced.
 
-``conversion_status`` doubles as the failure taxonomy
-    NULL means outstanding (not yet attempted, or explicitly re-armed for
-    retry). A non-NULL value is one of reroll's four documented error
-    categories, plus `unavailable`/`unexpected` for cases reroll itself
-    never gets a chance to raise, or `ok`. There is deliberately no separate
-    `error_category` column. A `runtime` failure -- reroll's own "says
-    nothing about the wheel, stop the batch" category -- is deliberately
-    *never* written here; the row is left NULL so it remains in the
-    worklist for a genuine retry once the environment is stable -- see
-    `reroll_data.reroll_convert`'s module docstring ("Runtime errors stop
-    the batch").
+A separate ``reroll_errors`` table, not a ``wheel.conversion_status`` column
+    `wheel.reroll_data` non-NULL *is* the "converted ok" signal (see below),
+    so the only other state a wheel needs recorded is "why didn't this
+    convert" -- and that is exactly the shape a one-row-per-failure table
+    fits, not another column on `wheel` itself. `reroll_errors.wheel_id` is
+    both this table's primary key and its foreign key into `wheel.id`: at
+    most one error row per wheel, replaced in place by the next attempt
+    (`INSERT ... ON CONFLICT(wheel_id) DO UPDATE`), never accumulated.
+    Presence of a row is "this wheel has an error"; absence is "no error" --
+    which, combined with `reroll_data`, is enough to recover the old
+    three-way state (never attempted / ok / failed) without a fourth column:
+    see `reroll_data.reroll_convert._categorize` for the taxonomy, and that
+    module's own docstring for how the worklist query is built from
+    `reroll_data IS NULL` plus an anti-join against this table.
+
+    `category` is one of reroll's four documented error categories, plus
+    `unavailable`/`unexpected` for cases reroll itself never gets a chance
+    to raise, plus `runtime` -- unlike the legacy `conversion_status` column
+    this replaced, `runtime` *is* written here, so a `RerollRuntimeError`
+    (reroll's own "says nothing about this wheel, stop the batch" category --
+    almost always an unstable environment: network, local cache, sqlite) is
+    visible in the accounting instead of silently vanishing. It must
+    nonetheless never count as a *settled* failure: a wheel whose only row
+    has `category = 'runtime'` has to stay in the worklist for a genuine
+    retry once the environment is stable, exactly like the old column's
+    NULL-on-runtime behaviour -- so every reader that decides "is this
+    wheel's failure final" filters out `category = 'runtime'` explicitly
+    (via `reroll_errors_category`, below) rather than treating any row's
+    mere presence as final. `sub_category` (the raising exception's class
+    name) and `description` (`str(exception)`) exist for one row's error at
+    a time; unlike `category` there is no CHECK on either -- reroll's
+    exception surface is not a fixed enum the way the five/six recorded
+    categories are, and a free-text description in particular can be
+    arbitrarily long (e.g. `MissingPypiCondaStaticMapping` lists every
+    offending dependency name).
+
+    `ON DELETE CASCADE` on `wheel_id`: `reroll_data.crawl` deletes `wheel`
+    rows outright once PyPI stops listing a project (`_delete_project`) or a
+    consistency sweep finds an orphan (`sync_consistency`) -- both run with
+    `PRAGMA foreign_keys=ON` (see `_connect`), so without CASCADE either
+    delete would fail outright with a FOREIGN KEY constraint violation the
+    moment the wheel being removed already has an error row.
 
 ``STRICT`` and ``CHECK`` from the start, on every table in both files
     Both require a full table rebuild to add after the fact (SQLite's
@@ -233,10 +264,12 @@ CREATE TABLE IF NOT EXISTS wheel (
     -- NULL: not yet determined. 0/1: whether this wheel's dependency set (or
     -- the wheel's own version) required accepting a pre-release to convert.
     requires_prerelease INTEGER CHECK (requires_prerelease IN (0, 1)),
-    -- The reroll version used to produce `reroll_data`/`conversion_status`.
+    -- The reroll version used to produce `reroll_data`/`reroll_errors`.
     reroll_version      TEXT,
     -- JSONB (see module docstring): the repodata entry reroll produced, or
-    -- NULL if not yet attempted or the attempt did not succeed.
+    -- NULL if not yet attempted or the attempt did not succeed. Non-NULL is
+    -- this wheel's *entire* "converted ok" signal -- see `reroll_errors`
+    -- below for why there is no separate status column.
     reroll_data         BLOB CHECK (reroll_data IS NULL OR json_valid(reroll_data, 8)),
     -- JSONB object {{pypi_name: conda_name actually used}}, including this
     -- wheel's own project -- every name this conversion resolved through
@@ -244,13 +277,6 @@ CREATE TABLE IF NOT EXISTS wheel (
     -- the module docstring; see there for why this column, kept here rather
     -- than in `pypi.db`, keeps the conversion job a `main.db`-only writer.
     resolutions         BLOB CHECK (resolutions IS NULL OR json_valid(resolutions, 8)),
-    -- NULL = outstanding (never attempted, or re-armed for retry). Otherwise
-    -- one of the values below -- see module docstring for the `runtime`
-    -- carve-out that deliberately never appears here.
-    conversion_status   TEXT CHECK (conversion_status IS NULL OR conversion_status IN (
-                            'ok', 'scope', 'invalid', 'unconvertable',
-                            'unavailable', 'unexpected'
-                        )),
     updated_at          INTEGER
 ) STRICT;
 
@@ -260,16 +286,70 @@ CREATE TABLE IF NOT EXISTS wheel (
 CREATE INDEX IF NOT EXISTS wheel_project
     ON wheel(project, filename);
 
--- Partial index over just the outstanding work. Deliberately a conjunction
--- of two equalities/IS-NULLs: SQLite's partial-index prover only reliably
--- matches that shape (an `IN`/`<>` predicate gets ignored and falls back to
--- a full scan). Excludes
--- yanked wheels: nothing consumes a yanked wheel's reroll_data under normal
+-- Partial index over every wheel that has not (yet) converted ok.
+-- Deliberately a conjunction of two equalities/IS-NULLs: SQLite's
+-- partial-index prover only reliably matches that shape (an `IN`/`<>`
+-- predicate gets ignored and falls back to a full scan). Excludes yanked
+-- wheels: nothing consumes a yanked wheel's reroll_data under normal
 -- dependency resolution, so it is not worklist work.
+--
+-- This covers both "never attempted" and "attempted and settled on a
+-- failure" rows -- unlike the `conversion_status`-based index this
+-- replaced, a single-table predicate here cannot also exclude a wheel with
+-- a `reroll_errors` row, since that lives in a different table. Consumers
+-- (`reroll_data.reroll_convert`'s worklist query) narrow the rest of the
+-- way with an anti-join against `reroll_errors` -- one indexed probe per
+-- candidate row, filtering out `category <> 'runtime'` rows specifically
+-- (see `reroll_errors` below for why `runtime` must stay eligible).
 CREATE INDEX IF NOT EXISTS wheel_todo
     ON wheel(id)
-    WHERE conversion_status IS NULL AND yanked = 0;
+    WHERE reroll_data IS NULL AND yanked = 0;
+
+-- One row per wheel reroll has ever failed to convert on its most recent
+-- attempt -- replaced in place (never accumulated) by the next attempt, and
+-- deleted entirely once a wheel is re-armed or actually converts. See
+-- module docstring's "A separate reroll_errors table" section for the full
+-- design rationale (why this is a table rather than a `wheel` column, the
+-- `runtime` carve-out, `ON DELETE CASCADE`).
+CREATE TABLE IF NOT EXISTS reroll_errors (
+    wheel_id     INTEGER PRIMARY KEY REFERENCES wheel(id) ON DELETE CASCADE,
+    category     TEXT NOT NULL CHECK (category IN (
+                     'scope', 'invalid', 'unconvertable', 'unavailable',
+                     'unexpected', 'runtime'
+                 )),
+    -- The raising exception's class name, e.g. 'UnsupportedPrereleaseError'
+    -- or 'MissingPypiCondaStaticMapping'. No CHECK/enum: reroll's exception
+    -- surface is not a fixed set the way `category` is.
+    sub_category TEXT,
+    -- str(exception). Free text, deliberately unbounded -- see module
+    -- docstring.
+    description  TEXT,
+    updated_at   INTEGER
+) STRICT;
+
+-- Lets a query cheaply isolate or exclude one or more categories -- e.g.
+-- reroll_convert's worklist anti-join filtering out 'runtime' specifically,
+-- or an ad hoc "how many unconvertable" count -- without a full table scan.
+CREATE INDEX IF NOT EXISTS reroll_errors_category
+    ON reroll_errors(category);
 """
+
+#: The "this wheel still needs a `reroll_convert.convert` attempt" predicate,
+#: aliasing `wheel` as `w` -- never converted ok, not yanked, and not already
+#: settled on a non-`runtime` failure (a `runtime`-only row never settles a
+#: wheel; see `reroll_errors`'s module docstring). Shared, verbatim, by
+#: `stats_main` and `reroll_data.reroll_convert.convert`'s worklist/count
+#: queries so the two can never silently disagree on what "outstanding"
+#: means. Matches `wheel_todo`'s partial index (`reroll_data IS NULL AND
+#: yanked = 0`) for the candidate rows it can seek, then narrows the rest of
+#: the way with one indexed anti-join probe per candidate against
+#: `reroll_errors`.
+OUTSTANDING_WHEEL = """(
+    w.reroll_data IS NULL AND w.yanked = 0 AND NOT EXISTS (
+        SELECT 1 FROM reroll_errors e
+        WHERE e.wheel_id = w.id AND e.category <> 'runtime'
+    )
+)"""
 
 # --------------------------------------------------------------------------- #
 # pypi.db
@@ -564,6 +644,7 @@ _MAIN_EXPECTED_STRICT = {
     # to be both WITHOUT ROWID and STRICT.
     "pypi_conda_names": False,
     "wheel": True,
+    "reroll_errors": True,
 }
 
 _MAIN_EXPECTED_COLUMNS = {
@@ -571,8 +652,10 @@ _MAIN_EXPECTED_COLUMNS = {
     "pypi_conda_names": {"pypi_name", "conda_name", "updated_at"},
     "wheel": {
         "id", "filename", "project", "yanked", "requires_prerelease",
-        "reroll_version", "reroll_data", "resolutions",
-        "conversion_status", "updated_at",
+        "reroll_version", "reroll_data", "resolutions", "updated_at",
+    },
+    "reroll_errors": {
+        "wheel_id", "category", "sub_category", "description", "updated_at",
     },
 }
 
@@ -676,22 +759,25 @@ def set_meta(db: sqlite3.Connection, key: str, value: str) -> None:
 
 def stats_main(db: sqlite3.Connection) -> dict[str, int]:
     q = lambda sql: db.execute(sql).fetchone()[0]  # noqa: E731
-    by_status = dict(
-        db.execute(
-            "SELECT coalesce(conversion_status, '(outstanding)'), count(*) "
-            "FROM wheel GROUP BY 1"
-        )
+    by_category = dict(
+        db.execute("SELECT category, count(*) FROM reroll_errors GROUP BY 1")
     )
     return {
         "wheels": q("SELECT count(*) FROM wheel"),
         "yanked": q("SELECT count(*) FROM wheel WHERE yanked = 1"),
-        "outstanding": by_status.get("(outstanding)", 0),
-        "ok": by_status.get("ok", 0),
-        "scope": by_status.get("scope", 0),
-        "invalid": by_status.get("invalid", 0),
-        "unconvertable": by_status.get("unconvertable", 0),
-        "unavailable": by_status.get("unavailable", 0),
-        "unexpected": by_status.get("unexpected", 0),
+        # A `runtime`-only row does not settle a wheel's failure (see
+        # `reroll_errors`'s module docstring), so it is still outstanding.
+        "outstanding": q(f"SELECT count(*) FROM wheel w WHERE {OUTSTANDING_WHEEL}"),
+        "ok": q("SELECT count(*) FROM wheel WHERE reroll_data IS NOT NULL"),
+        "scope": by_category.get("scope", 0),
+        "invalid": by_category.get("invalid", 0),
+        "unconvertable": by_category.get("unconvertable", 0),
+        "unavailable": by_category.get("unavailable", 0),
+        "unexpected": by_category.get("unexpected", 0),
+        # Accounting only -- see `reroll_errors`'s module docstring for why
+        # this is never a settled failure and is already folded into
+        # "outstanding" above rather than subtracted from it.
+        "runtime": by_category.get("runtime", 0),
         "mapped_names": q(
             "SELECT count(*) FROM pypi_conda_names WHERE conda_name IS NOT NULL"
         ),

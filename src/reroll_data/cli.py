@@ -201,8 +201,11 @@ def cmd_metadata_show(args: argparse.Namespace) -> int:
 
 def cmd_reroll_status(args: argparse.Namespace) -> int:
     """Show reroll's own conversion counts, sourced from `main.db.wheel`
-    (`reroll_data.db2`). See `_db2.stats_main` for the category breakdown
-    (outstanding/ok/scope/invalid/unconvertable/unavailable/unexpected).
+    plus `main.db.reroll_errors` (`reroll_data.db2`). See `_db2.stats_main`
+    for the category breakdown
+    (outstanding/ok/scope/invalid/unconvertable/unavailable/unexpected/runtime
+    -- `runtime` is accounting-only, already folded into `outstanding` since
+    it never settles a wheel's failure).
     """
     db = _db2.connect_main(args.data_dir, read_only=True)
     _db2.init_main(db)
@@ -397,8 +400,8 @@ def build_parser() -> argparse.ArgumentParser:
         "reroll-status",
         help=(
             "show reroll's own conversion counts by category "
-            "(scope/invalid/unconvertable/unavailable/unexpected/ok/outstanding), "
-            "plus coverage and unconvertable percentages, from main.db.wheel"
+            "(scope/invalid/unconvertable/unavailable/unexpected/runtime/ok/outstanding), "
+            "plus coverage and unconvertable percentages, from main.db.wheel/reroll_errors"
         ),
     )
     rs.set_defaults(func=cmd_reroll_status)
@@ -420,7 +423,7 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument(
         "--retry-errors",
         action="store_true",
-        help="also re-attempt wheels previously marked with a non-ok conversion_status",
+        help="also re-attempt wheels previously marked with a settled (non-runtime) error",
     )
     cv.add_argument(
         "--retry-stale-version",

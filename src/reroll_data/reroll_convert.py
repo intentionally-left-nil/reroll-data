@@ -64,7 +64,7 @@ curated ourselves yet. Rather than silently trust that live guess, this:
    never clobbered.
 2. Rejects the whole wheel with :class:`MissingPypiCondaStaticMapping`, a
    `RerollUnconvertableError` subclass -- so it falls into the ordinary
-   `unconvertable` bucket of `main.db.wheel.conversion_status` without a
+   `unconvertable` bucket of `main.db.reroll_errors.category` without a
    schema change (that column's CHECK constraint is a fixed enum; adding a
    value would need a full table rebuild, per `reroll_data.db2`'s "STRICT
    and CHECK from the start" design note).
@@ -99,31 +99,43 @@ all -- the column describes a wheel that *converted*, not a failure.
 
 `reroll_version`, for cheap re-runs after a reroll upgrade
 --------------------------------------------------------------
-Every write to `main.db.wheel` (success or any recorded failure category --
-never a `runtime` one, which is deliberately left NULL for a real retry, see
-below) stamps `reroll_version = reroll.__version__` -- the installed
-`py-reroll` distribution version, the same provenance value
+Every write to `main.db.wheel` -- a success, any settled failure category,
+*and* now a `runtime` one too (see `reroll_data.db2`'s module docstring for
+why `runtime` is recorded at all despite never settling a wheel) -- stamps
+`reroll_version = reroll.__version__` -- the installed `py-reroll`
+distribution version, the same provenance value
 `reroll_data.metadata.PARSER_VERSION` already uses, not this repo's own
-`pyproject.toml` version. A future run can cheaply find every row a newer
-reroll might resolve differently with
-`WHERE reroll_version IS NULL OR reroll_version <> '<current>'`
+`pyproject.toml` version. Because every attempt stamps it, `reroll_version`
+is NULL *exactly* for a wheel that has never been attempted -- a future run
+can cheaply find every row a newer reroll might resolve differently with
+`WHERE reroll_version IS NOT NULL AND reroll_version <> '<current>'`
 (`reset_stale_version` below does exactly that).
 
-Runtime errors stop the batch
--------------------------------
-Unchanged from the previous version of this module: a `RerollRuntimeError`
-says nothing about the wheel, so it is never written to `conversion_status`
-(the row stays outstanding) and stops the run after flushing whatever the
-current batch already decided.
+Runtime errors stop the batch, but are now recorded
+-----------------------------------------------------
+A `RerollRuntimeError` says nothing about the wheel it happened to be
+converting, so it must never *settle* that wheel's failure -- unlike the
+previous version of this module (which left the row completely untouched),
+this one still writes a `main.db.reroll_errors` row with `category =
+'runtime'`, purely for accounting/visibility (see `reroll_data.db2`'s module
+docstring). Every reader that decides "is this wheel done" (the worklist
+query below, `stats_main`) explicitly excludes `category = 'runtime'` when
+checking for a settled failure, so the row does not stop the wheel being
+retried. The batch itself still stops after flushing whatever it already
+decided -- the error says nothing about *this* wheel, but every remaining
+wheel in the batch is likely to hit the same unstable environment.
 
 Idempotency and resumability
 -----------------------------
 Work is selected with `main.db.wheel`'s own `wheel_todo` partial index
-(`WHERE conversion_status IS NULL AND yanked = 0`), so a row that already
-succeeded or failed simply stops matching -- no lease/claim machinery needed,
-the same reasoning as the `v.db`-based predecessor. `reset_errors` re-arms
-every non-`ok` row (mirroring the old module's `reset_errors`);
-`reset_stale_version` re-arms rows an older reroll produced.
+(`WHERE reroll_data IS NULL AND yanked = 0`) narrowed by an anti-join
+against `main.db.reroll_errors` (excluding `category = 'runtime'`, which
+never settles a wheel) -- see :data:`reroll_data.db2.OUTSTANDING_WHEEL`. A
+row that already succeeded or settled on a failure simply stops matching --
+no lease/claim machinery needed, the same reasoning as the `v.db`-based
+predecessor. `reset_errors` re-arms every wheel with a settled
+(non-`runtime`) error; `reset_stale_version` re-arms rows an older reroll
+produced.
 """
 
 from __future__ import annotations
@@ -163,11 +175,17 @@ from . import db2 as _db2
 #: curated this" apart from "reroll's live chain guessed this" by name alone.
 STATIC_MAPPER_NAME = "pypi_conda_names_mapper"
 
-#: Every `main.db.wheel.conversion_status` value :func:`_categorize` can
-#: return for a *recorded* outcome -- i.e. everything except `"runtime"`,
-#: which is deliberately never written (see module docstring). Matches
-#: `reroll_data.db2.MAIN_SCHEMA`'s CHECK constraint exactly.
-CATEGORIES = ("ok", "scope", "invalid", "unconvertable", "unavailable", "unexpected")
+#: Every value :func:`_categorize` can return that gets persisted to
+#: `main.db.reroll_errors.category` -- unlike the legacy `conversion_status`
+#: column this table replaced, `"runtime"` *is* included: a
+#: `RerollRuntimeError` is now recorded for accounting instead of silently
+#: leaving the row untouched (see module docstring's "Runtime errors stop
+#: the batch, but are now recorded"). `"ok"` is deliberately not a member --
+#: a successful wheel gets no `reroll_errors` row at all, see
+#: `reroll_data.db2`'s module docstring. Matches
+#: `reroll_data.db2.MAIN_SCHEMA`'s `reroll_errors.category` CHECK constraint
+#: exactly.
+CATEGORIES = ("scope", "invalid", "unconvertable", "unavailable", "unexpected", "runtime")
 
 #: Rows pulled from `main.db.wheel` per round trip / progress report.
 READ_BATCH = 2000
@@ -232,8 +250,8 @@ def _is_prerelease_error(exc: Exception) -> bool:
 
 
 def _categorize(exc: BaseException) -> str:
-    """One of :data:`CATEGORIES`, or `"runtime"` for the one category this
-    module refuses to write to `conversion_status` (see module docstring).
+    """One of :data:`CATEGORIES` -- including `"runtime"`, now persisted
+    (as a non-settling row) rather than refused, see module docstring.
     """
     if isinstance(exc, MetadataUnavailable):
         return "unavailable"
@@ -435,6 +453,11 @@ class _Result:
     requires_prerelease: bool | None = None
     reroll_data_json: str | None = None
     resolutions_json: str | None = None
+    #: `main.db.reroll_errors.sub_category`/`.description` for a failure --
+    #: the raising exception's class name and `str(exception)`, respectively.
+    #: Always `None` for `category == "ok"`.
+    sub_category: str | None = None
+    description: str | None = None
     #: pypi_names to seed into `pypi_conda_names` as `(name, NULL, NULL)` --
     #: only set when `category == "unconvertable"` via
     #: `MissingPypiCondaStaticMapping`. Written by the single writer
@@ -465,7 +488,13 @@ def _convert_one(item: tuple[int, str]) -> _Result:
     except Exception as exc:  # noqa: BLE001 - any conversion failure is data
         category = _categorize(exc)
         seed_names = exc.names if isinstance(exc, MissingPypiCondaStaticMapping) else ()
-        return _Result(wheel_id, category, seed_names=seed_names)
+        return _Result(
+            wheel_id,
+            category,
+            sub_category=type(exc).__name__,
+            description=str(exc),
+            seed_names=seed_names,
+        )
     return _Result(
         wheel_id,
         "ok",
@@ -481,27 +510,38 @@ def _convert_one(item: tuple[int, str]) -> _Result:
 
 
 def reset_errors(main_db: sqlite3.Connection) -> int:
-    """Re-arm every non-`ok`, non-outstanding row for another attempt.
+    """Re-arm every wheel with a settled (non-`runtime`) error for another
+    attempt.
 
     Mirrors the previous version of this module's `reset_errors`: `convert`'s
-    selection predicate (`conversion_status IS NULL`) excludes any row with a
-    category already recorded, so a wheel that failed once is otherwise
-    skipped forever. Only relevant after a reroll fix or a `pypi_conda_names`
-    curation pass -- re-running `convert()` unmodified would just reproduce
-    the same rejections.
+    selection predicate excludes any wheel with a settled `reroll_errors`
+    row, so a wheel that failed once is otherwise skipped forever. Only
+    relevant after a reroll fix or a `pypi_conda_names` curation pass --
+    re-running `convert()` unmodified would just reproduce the same
+    rejections. Deliberately leaves `runtime`-only rows alone -- those never
+    excluded the wheel from the worklist in the first place (see module
+    docstring), so there is nothing to re-arm.
+
+    The `wheel` `UPDATE` runs first, while its `reroll_errors` subquery still
+    sees the about-to-be-cleared rows; the `DELETE` that actually clears them
+    runs after, using the same `category <> 'runtime'` predicate (unaffected
+    by the `UPDATE`, which never touches `reroll_errors`) -- so the two
+    statements can't disagree about which rows they mean.
     """
     now = int(time.time())
     main_db.execute("BEGIN IMMEDIATE")
     try:
         n = (
             main_db.execute(
-                "UPDATE wheel SET conversion_status = NULL, reroll_data = NULL, "
-                "resolutions = NULL, requires_prerelease = NULL, reroll_version = NULL, "
-                "updated_at = ? WHERE conversion_status IS NOT NULL AND conversion_status <> 'ok'",
+                "UPDATE wheel SET reroll_data = NULL, resolutions = NULL, "
+                "requires_prerelease = NULL, reroll_version = NULL, updated_at = ? "
+                "WHERE id IN ("
+                "SELECT wheel_id FROM reroll_errors WHERE category <> 'runtime')",
                 (now,),
             ).rowcount
             or 0
         )
+        main_db.execute("DELETE FROM reroll_errors WHERE category <> 'runtime'")
         main_db.execute("COMMIT")
     except BaseException:
         main_db.execute("ROLLBACK")
@@ -510,41 +550,49 @@ def reset_errors(main_db: sqlite3.Connection) -> int:
 
 
 def reset_unconvertable(main_db: sqlite3.Connection) -> int:
-    """Re-arm every `unconvertable` row for another attempt -- the narrow
-    slice of :func:`reset_errors` relevant right after a
-    `reroll_data.refresh_names.refresh` run, rather than a full reroll
-    upgrade.
+    """Re-arm every wheel whose most recent attempt was rejected specifically
+    by :class:`MissingPypiCondaStaticMapping` -- the "no curated conda name"
+    error -- for another attempt. The narrow slice of :func:`reset_errors`
+    relevant right after a `reroll_data.refresh_names.refresh` run, rather
+    than a full reroll upgrade.
 
-    `unconvertable` is reroll's own catch-all category for
-    `RerollUnconvertableError` (see :func:`_categorize`), and this repo's
-    single biggest contributor to it is :class:`MissingPypiCondaStaticMapping`
-    -- raised specifically when a dependency resolved to a name not yet
-    curated in `main.db.pypi_conda_names` (module docstring's "The new
-    mapper" section). A `refresh_names.refresh` run is exactly what fills
-    in those curated rows; without re-arming here, a wheel rejected for
-    that reason stays rejected forever, since `convert`'s selection
-    predicate (`conversion_status IS NULL`) never looks at it again.
+    Narrowed via `reroll_errors.sub_category` (the raising exception's class
+    name) to this one exception specifically, not the whole `unconvertable`
+    category: `unconvertable` is reroll's own catch-all for
+    `RerollUnconvertableError`, and :class:`MissingPypiCondaStaticMapping` is
+    only one of its raise sites -- the one this repo raises itself,
+    specifically when a dependency resolved to a name not yet curated in
+    `main.db.pypi_conda_names` (module docstring's "The new mapper" section).
+    It is also the only `unconvertable` cause a `pypi_conda_names` curation
+    pass can plausibly fix; every other `unconvertable` rejection (a bad
+    matchspec, an over-long extra, a marker referring to `extra`, ...) would
+    just reproduce the identical rejection on the very next `convert` pass
+    regardless of what this run curated, so leaving those rows settled
+    (rather than re-arming them too) avoids wasted re-attempts at scale.
 
-    There is no persisted record of *which* pypi_name(s) doomed a given
-    `unconvertable` wheel -- only the category string survives `_Result`
-    past one run -- so this is deliberately blanket, not surgical: every
-    `unconvertable` row is re-armed, on the expectation that a wheel whose
-    real blocker was unrelated to naming will simply reproduce the same
-    rejection on the next `convert` pass. Cheap either way relative to
-    `invalidate_wheels`'s own resolutions-scan cost, since `unconvertable`
-    rows carry no `resolutions` to decode in the first place.
+    A `refresh_names.refresh` run is exactly what fills in those curated
+    rows; without re-arming here, a wheel rejected for that reason stays
+    rejected forever, since `convert`'s selection predicate never looks at a
+    settled `reroll_errors` row again.
     """
+    sub_category = MissingPypiCondaStaticMapping.__name__
     now = int(time.time())
     main_db.execute("BEGIN IMMEDIATE")
     try:
         n = (
             main_db.execute(
-                "UPDATE wheel SET conversion_status = NULL, reroll_data = NULL, "
-                "resolutions = NULL, requires_prerelease = NULL, reroll_version = NULL, "
-                "updated_at = ? WHERE conversion_status = 'unconvertable'",
-                (now,),
+                "UPDATE wheel SET reroll_data = NULL, resolutions = NULL, "
+                "requires_prerelease = NULL, reroll_version = NULL, updated_at = ? "
+                "WHERE id IN ("
+                "SELECT wheel_id FROM reroll_errors "
+                "WHERE category = 'unconvertable' AND sub_category = ?)",
+                (now, sub_category),
             ).rowcount
             or 0
+        )
+        main_db.execute(
+            "DELETE FROM reroll_errors WHERE category = 'unconvertable' AND sub_category = ?",
+            (sub_category,),
         )
         main_db.execute("COMMIT")
     except BaseException:
@@ -554,24 +602,41 @@ def reset_unconvertable(main_db: sqlite3.Connection) -> int:
 
 
 def reset_stale_version(main_db: sqlite3.Connection, *, current_version: str | None = None) -> int:
-    """Re-arm every row (`ok` included) whose `reroll_version` disagrees
-    with `current_version` (defaults to the installed `reroll.__version__`)
-    -- see the module docstring's "`reroll_version`, for cheap re-runs"
-    section. A row that has never been attempted (`reroll_version IS NULL`
-    and `conversion_status IS NULL`) is left alone; it is already outstanding
-    work, not something to re-arm.
+    """Re-arm every row (`ok` and any settled or `runtime` error included)
+    whose `reroll_version` disagrees with `current_version` (defaults to the
+    installed `reroll.__version__`) -- see the module docstring's
+    "`reroll_version`, for cheap re-runs" section. A row that has never been
+    attempted (`reroll_version IS NULL`) is left alone; it is already
+    outstanding work, not something to re-arm. Since every attempt --
+    success, settled failure, or `runtime` -- stamps `reroll_version`,
+    `reroll_version IS NOT NULL` alone is exactly "has been attempted",
+    replacing the old `conversion_status IS NOT NULL` guard with no change
+    in meaning.
+
+    The `DELETE` runs first here, deliberately the opposite order from
+    :func:`reset_errors`/:func:`reset_unconvertable`: its subquery reads
+    `wheel.reroll_version`, which the `UPDATE` below is about to null out,
+    so it must see the pre-`UPDATE` value. The `UPDATE`'s own predicate reads
+    the same, still-untouched `wheel.reroll_version` column, so the two
+    statements agree on the same row set regardless of ordering between
+    themselves -- only the dependency on `wheel.reroll_version` staying
+    intact until both have read it is real, and `DELETE`-then-`UPDATE`
+    satisfies that.
     """
     version = current_version or reroll.__version__
-    now = int(time.time())
     main_db.execute("BEGIN IMMEDIATE")
     try:
+        main_db.execute(
+            "DELETE FROM reroll_errors WHERE wheel_id IN ("
+            "SELECT id FROM wheel WHERE reroll_version IS NOT NULL AND reroll_version <> ?)",
+            (version,),
+        )
+        now = int(time.time())
         n = (
             main_db.execute(
-                "UPDATE wheel SET conversion_status = NULL, reroll_data = NULL, "
-                "resolutions = NULL, requires_prerelease = NULL, reroll_version = NULL, "
-                "updated_at = ? "
-                "WHERE conversion_status IS NOT NULL "
-                "AND coalesce(reroll_version, '') <> ?",
+                "UPDATE wheel SET reroll_data = NULL, resolutions = NULL, "
+                "requires_prerelease = NULL, reroll_version = NULL, updated_at = ? "
+                "WHERE reroll_version IS NOT NULL AND reroll_version <> ?",
                 (now, version),
             ).rowcount
             or 0
@@ -594,8 +659,10 @@ def convert(
     progress_every: float = 5.0,
     allow_pre: bool = False,
 ) -> dict:
-    """Populate `main.db.wheel`'s conversion-facing columns for every
-    outstanding (`conversion_status IS NULL AND yanked = 0`) row.
+    """Populate `main.db.wheel`'s conversion-facing columns, plus
+    `main.db.reroll_errors`, for every outstanding row (see
+    :data:`reroll_data.db2.OUTSTANDING_WHEEL`: never converted ok, not
+    yanked, and not already settled on a non-`runtime` failure).
 
     `allow_pre` here gates only the *first* attempt: `True` skips the
     pre-release retry entirely (every wheel is tried once, with pre-releases
@@ -603,8 +670,9 @@ def convert(
     policy described in the module docstring.
 
     Stops early (`interrupted=True`) the first time any wheel fails with
-    reroll's `"runtime"` category -- that row's `conversion_status` is left
-    unwritten, so it is retried once the run is retried.
+    reroll's `"runtime"` category -- that row's `reroll_errors` entry is
+    still written (for accounting), but a `runtime`-only row never settles a
+    wheel (see module docstring), so it is retried once the run is retried.
     """
     workers = workers or os.process_cpu_count() or os.cpu_count() or 1
     data_dir = Path(data_dir)
@@ -617,7 +685,7 @@ def convert(
 
     table_total = read_db.execute("SELECT count(*) FROM wheel").fetchone()[0]
     outstanding_before = read_db.execute(
-        "SELECT count(*) FROM wheel WHERE conversion_status IS NULL AND yanked = 0"
+        f"SELECT count(*) FROM wheel w WHERE {_db2.OUTSTANDING_WHEEL}"
     ).fetchone()[0]
     total = outstanding_before if limit is None else min(outstanding_before, limit)
     coverage_before = (
@@ -639,7 +707,14 @@ def convert(
     remaining_limit = limit
     check_wal = _db2.wal_monitor(data_dir / _db2.MAIN_DB_FILENAME)
 
-    pending_writes: list[tuple[int, str | None, str | None, int | None, str | None]] = []
+    #: (wheel_id, category, reroll_data_json, resolutions_json,
+    #: requires_prerelease, sub_category, description) -- one entry per
+    #: wheel this batch decided, `category == "ok"` included, so `flush`
+    #: can both update `wheel` and upsert/clear `reroll_errors` from the
+    #: same list.
+    pending_writes: list[
+        tuple[int, str, str | None, str | None, int | None, str | None, str | None]
+    ] = []
     #: pypi_names to seed as `(name, NULL, NULL)`, deduped across the whole
     #: batch before the single writer connection inserts them.
     pending_seeds: set[str] = set()
@@ -659,14 +734,44 @@ def convert(
                 )
             if pending_writes:
                 write_db.executemany(
-                    "UPDATE wheel SET conversion_status = ?, reroll_data = jsonb(?), "
-                    "resolutions = jsonb(?), requires_prerelease = ?, reroll_version = ?, "
-                    "updated_at = ? WHERE id = ?",
+                    "UPDATE wheel SET reroll_data = jsonb(?), resolutions = jsonb(?), "
+                    "requires_prerelease = ?, reroll_version = ?, updated_at = ? "
+                    "WHERE id = ?",
                     [
-                        (status, data, res, req_pre, version, now, wid)
-                        for (wid, status, data, res, req_pre) in pending_writes
+                        (data, res, req_pre, version, now, wid)
+                        for (wid, _cat, data, res, req_pre, _sub, _desc) in pending_writes
                     ],
                 )
+                # `ok` clears any stale `reroll_errors` row (the one case
+                # this matters: a `runtime`-only row from a previous,
+                # unstable run, now superseded by success) -- see module
+                # docstring's "Runtime errors stop the batch, but are now
+                # recorded". Every other category upserts its row in place,
+                # `ON CONFLICT` covering the same "retried after a
+                # `runtime` failure, failed again differently" case.
+                ok_ids = [wid for (wid, cat, *_rest) in pending_writes if cat == "ok"]
+                error_rows = [
+                    (wid, cat, sub, desc, now)
+                    for (wid, cat, _data, _res, _req, sub, desc) in pending_writes
+                    if cat != "ok"
+                ]
+                if ok_ids:
+                    write_db.executemany(
+                        "DELETE FROM reroll_errors WHERE wheel_id = ?",
+                        [(wid,) for wid in ok_ids],
+                    )
+                if error_rows:
+                    write_db.executemany(
+                        "INSERT INTO reroll_errors"
+                        "(wheel_id, category, sub_category, description, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?) "
+                        "ON CONFLICT(wheel_id) DO UPDATE SET "
+                        "category = excluded.category, "
+                        "sub_category = excluded.sub_category, "
+                        "description = excluded.description, "
+                        "updated_at = excluded.updated_at",
+                        error_rows,
+                    )
             write_db.execute("COMMIT")
         except BaseException:
             write_db.execute("ROLLBACK")
@@ -689,7 +794,7 @@ def convert(
         attempted = table_total - outstanding_before + done
         coverage = attempted / table_total * 100 if table_total else 0.0
         breakdown = "  ".join(
-            f"{cat}={counters[cat]:,}" for cat in (*CATEGORIES[1:], "runtime") if counters[cat]
+            f"{cat}={counters[cat]:,}" for cat in CATEGORIES if counters[cat]
         )
         print(
             f"  {done:>9,}/{total:,} converted  {remaining:>9,} remaining  "
@@ -712,11 +817,9 @@ def convert(
                 # Re-issued fresh every batch, fully drained by `fetchall()`
                 # -- see `reroll_data.db2.wal_monitor`'s docstring on why an
                 # unfinished SELECT left open across a whole run pins the
-                # WAL. `wheel_todo` (`WHERE conversion_status IS NULL AND
-                # yanked = 0`) covers this exactly.
+                # WAL. `_db2.OUTSTANDING_WHEEL` covers this exactly.
                 rows = read_db.execute(
-                    "SELECT id, filename FROM wheel "
-                    "WHERE conversion_status IS NULL AND yanked = 0 "
+                    f"SELECT w.id, w.filename FROM wheel w WHERE {_db2.OUTSTANDING_WHEEL} "
                     "LIMIT ?",
                     (n,),
                 ).fetchall()
@@ -726,15 +829,6 @@ def convert(
                     remaining_limit -= len(rows)
 
                 for result in pool.map(_convert_one, rows, chunksize=chunksize):
-                    if result.category == "runtime":
-                        # Says nothing about this wheel, and every remaining
-                        # wheel in this batch is likely to hit the same
-                        # unstable environment -- stop rather than burn
-                        # through the rest of the corpus reproducing it.
-                        # Left unwritten so a retry lands on a clean NULL row.
-                        runtime_error = (result.wheel_id, "runtime error")
-                        counters["runtime"] += 1
-                        break
                     counters[result.category] += 1
                     pending_seeds.update(result.seed_names)
                     pending_writes.append(
@@ -748,10 +842,23 @@ def convert(
                                 if result.requires_prerelease is None
                                 else int(result.requires_prerelease)
                             ),
+                            result.sub_category,
+                            result.description,
                         )
                     )
                     if len(pending_writes) >= write_batch:
                         flush()
+                    if result.category == "runtime":
+                        # Says nothing about this wheel, and every remaining
+                        # wheel in this batch is likely to hit the same
+                        # unstable environment -- stop rather than burn
+                        # through the rest of the corpus reproducing it. The
+                        # row above is still flushed below (recorded for
+                        # accounting), but a `runtime`-only row never
+                        # settles a wheel, so it stays eligible for a
+                        # genuine retry -- see module docstring.
+                        runtime_error = (result.wheel_id, result.description or "runtime error")
+                        break
                 flush()
                 report()
                 if runtime_error is not None:
@@ -810,7 +917,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--retry-errors",
         action="store_true",
-        help="also re-attempt wheels previously marked with a non-ok conversion_status",
+        help="also re-attempt wheels previously marked with a settled (non-runtime) error",
     )
     parser.add_argument(
         "--retry-stale-version",

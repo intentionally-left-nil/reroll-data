@@ -99,8 +99,8 @@ non-NULL `resolutions` (i.e. every successfully-converted wheel) -- there
 is no index into a JSONB object's keys, so that part of the cost is
 unavoidable with the current schema regardless of how few names changed.
 
-Re-arming `unconvertable` wheels too
---------------------------------------
+Re-arming the wheels this can actually help
+----------------------------------------------
 The invalidation sweep above only ever looks at `w.resolutions`, which is
 NULL for any wheel that did not successfully convert -- so it structurally
 cannot help a wheel `reroll_convert` rejected outright. The single largest
@@ -110,11 +110,13 @@ name not yet in the curated `pypi_conda_names` table -- see
 exactly the gap a `pypi_conda_names` curation pass like this one can close.
 `refresh` therefore also calls `reroll_convert.reset_unconvertable` after
 `invalidate_wheels`, whenever this run actually changed anything (`changed`
-non-empty) -- re-arming every `unconvertable` wheel for another `convert`
-attempt. See that function's own docstring for why this is deliberately
-blanket (every `unconvertable` row) rather than targeted at just the names
-this run changed: nothing persists *which* name doomed a given wheel past
-one `convert` run, only the category string.
+non-empty) -- re-arming every wheel whose most recent attempt was rejected
+specifically by `MissingPypiCondaStaticMapping` (via
+`reroll_errors.sub_category`), not every `unconvertable` wheel: any other
+`unconvertable` rejection (a bad matchspec, an over-long extra, ...) is
+unrelated to naming and would just reproduce the identical rejection on the
+very next `convert` pass regardless of what this run curated. See that
+function's own docstring for the full reasoning.
 """
 
 from __future__ import annotations
@@ -368,10 +370,23 @@ def invalidate_wheels(
         main_db.execute("BEGIN IMMEDIATE")
         try:
             main_db.execute(
-                "UPDATE wheel SET conversion_status = NULL, reroll_data = NULL, "
+                "UPDATE wheel SET reroll_data = NULL, "
                 "resolutions = NULL, requires_prerelease = NULL, reroll_version = NULL, "
                 f"updated_at = ? WHERE id IN ({placeholders})",
                 (now, *chunk),
+            )
+            # Defensive, not expected to match anything in practice: every
+            # id here came from a non-NULL `resolutions` (module docstring),
+            # which means it converted ok and so never had a `reroll_errors`
+            # row to begin with (see that table's module docstring in
+            # `reroll_data.db2` -- the two are mutually exclusive by
+            # construction). Kept for the same reason `reroll_convert`'s
+            # reset functions always pair a `wheel` re-arm with clearing any
+            # `reroll_errors` row, rather than relying on that invariant
+            # holding forever.
+            main_db.execute(
+                f"DELETE FROM reroll_errors WHERE wheel_id IN ({placeholders})",
+                chunk,
             )
             main_db.execute("COMMIT")
         except BaseException:
@@ -456,14 +471,19 @@ def refresh(
     # rejected outright as `unconvertable` (reroll_convert.py's
     # `MissingPypiCondaStaticMapping`: a dependency resolved to a name not
     # yet curated here). This run's `pypi_conda_names` write is exactly
-    # what might fill that gap in for some of them, so re-arm the whole
-    # `unconvertable` bucket too -- skipped when `changed` is empty, since
-    # nothing about the curated mapping moved this run. See
-    # `reroll_convert.reset_unconvertable`'s docstring for why this is
-    # blanket rather than surgical.
+    # what might fill that gap in for some of them, so re-arm just the
+    # wheels `MissingPypiCondaStaticMapping` rejected (not every
+    # `unconvertable` wheel -- an unrelated rejection would just reproduce
+    # itself) -- skipped when `changed` is empty, since nothing about the
+    # curated mapping moved this run. See
+    # `reroll_convert.reset_unconvertable`'s docstring for the full
+    # reasoning.
     reset_stats = {"reset_unconvertable": 0}
     if changed:
-        print("re-arming unconvertable wheels for another attempt ...", file=sys.stderr)
+        print(
+            "re-arming wheels rejected for a missing conda name mapping ...",
+            file=sys.stderr,
+        )
         reset_stats = {
             "reset_unconvertable": _reroll_convert.reset_unconvertable(main_db)
         }
