@@ -98,6 +98,23 @@ diff-driven case.
 non-NULL `resolutions` (i.e. every successfully-converted wheel) -- there
 is no index into a JSONB object's keys, so that part of the cost is
 unavoidable with the current schema regardless of how few names changed.
+
+Re-arming `unconvertable` wheels too
+--------------------------------------
+The invalidation sweep above only ever looks at `w.resolutions`, which is
+NULL for any wheel that did not successfully convert -- so it structurally
+cannot help a wheel `reroll_convert` rejected outright. The single largest
+such rejection, `MissingPypiCondaStaticMapping` (a dependency resolved to a
+name not yet in the curated `pypi_conda_names` table -- see
+`reroll_convert`'s own module docstring's "The new mapper" section), is
+exactly the gap a `pypi_conda_names` curation pass like this one can close.
+`refresh` therefore also calls `reroll_convert.reset_unconvertable` after
+`invalidate_wheels`, whenever this run actually changed anything (`changed`
+non-empty) -- re-arming every `unconvertable` wheel for another `convert`
+attempt. See that function's own docstring for why this is deliberately
+blanket (every `unconvertable` row) rather than targeted at just the names
+this run changed: nothing persists *which* name doomed a given wheel past
+one `convert` run, only the category string.
 """
 
 from __future__ import annotations
@@ -113,6 +130,7 @@ from reroll.errors import UnresolvedCondaNameError
 from reroll.name_mapping import NameMappers, map_name
 
 from . import db2 as _db2
+from . import reroll_convert as _reroll_convert
 
 #: Rows read from `pypi_conda_names` per round trip.
 READ_BATCH = 2000
@@ -295,6 +313,23 @@ def invalidate_wheels(
     re-joining `pypi_conda_names`. `changed` empty is a no-op -- nothing to
     invalidate.
 
+    `changed` is materialized into a `TEMP` table (`key TEXT PRIMARY KEY`)
+    before the join, rather than joined against `json_each(?)` directly.
+    `json_each` is a scan-only eponymous virtual table -- it has no way to
+    be seeked by `key`, so `EXPLAIN QUERY PLAN` on the direct-`json_each`
+    form shows `SCAN c VIRTUAL TABLE INDEX 1:` nested *inside* the
+    `wheel`/`resolutions` loop: SQLite re-scans (and re-parses) the entire
+    bound JSON blob once per dependency-key row on the other side of the
+    join, an `O(total_dependency_rows * len(changed))` blowup that is fine
+    when `changed` is small but pathological on a run that rewrites most
+    or all of `pypi_conda_names`. A real table -- even a session-local,
+    auto-dropped `TEMP` one -- gets a real B-tree on its `PRIMARY KEY`, so
+    the same query instead plans as `SEARCH c USING PRIMARY KEY (key=?)`:
+    one indexed lookup per dependency-key row, independent of `len(changed)`.
+    Dropped explicitly (rather than left for connection-close) so a second
+    call on the same connection within one process never collides with a
+    leftover table from a prior call.
+
     The `SELECT` is fully drained with `fetchall()` before any `UPDATE`
     runs, mirroring `reroll_convert.convert`'s own reasoning for never
     holding a read cursor open across writes on the same connection: here
@@ -304,15 +339,27 @@ def invalidate_wheels(
     if not changed:
         return {"invalidated": 0}
     changed_json = json.dumps(changed, separators=(",", ":"))
-    ids = [
-        row[0]
-        for row in main_db.execute(
-            "SELECT DISTINCT w.id FROM wheel w, json_each(w.resolutions) r "
-            "JOIN json_each(?) c ON c.key = r.key "
-            "WHERE w.yanked = 0 AND r.value <> c.value",
+    main_db.execute("DROP TABLE IF EXISTS temp.changed_names")
+    main_db.execute(
+        "CREATE TEMP TABLE changed_names (key TEXT PRIMARY KEY, value TEXT) "
+        "WITHOUT ROWID"
+    )
+    try:
+        main_db.execute(
+            "INSERT INTO temp.changed_names(key, value) "
+            "SELECT key, value FROM json_each(?)",
             (changed_json,),
-        ).fetchall()
-    ]
+        )
+        ids = [
+            row[0]
+            for row in main_db.execute(
+                "SELECT DISTINCT w.id FROM wheel w, json_each(w.resolutions) r "
+                "JOIN temp.changed_names c ON c.key = r.key "
+                "WHERE w.yanked = 0 AND r.value <> c.value"
+            ).fetchall()
+        ]
+    finally:
+        main_db.execute("DROP TABLE temp.changed_names")
     now = int(time.time())
     invalidated = 0
     for i in range(0, len(ids), batch_size):
@@ -348,7 +395,9 @@ def refresh(
     """Refresh every `main.db.pypi_conda_names` row against reroll's
     current default mapper chain, then re-arm every `main.db.wheel` row
     whose already-recorded `resolutions` used one of the names that
-    changed. See module docstring.
+    changed, plus every `unconvertable` wheel (which never had a chance to
+    use this run's newly-curated names in the first place). See module
+    docstring.
     """
     data_dir = Path(data_dir)
     main_db = _db2.connect_main(data_dir)
@@ -402,9 +451,27 @@ def refresh(
     for key, value in invalidate_stats.items():
         print(f"  {key:<16} {value:,}", file=sys.stderr)
 
+    # `invalidate_wheels` only re-checks wheels that already *succeeded*
+    # (non-NULL `resolutions`) -- it has no way to help a wheel that was
+    # rejected outright as `unconvertable` (reroll_convert.py's
+    # `MissingPypiCondaStaticMapping`: a dependency resolved to a name not
+    # yet curated here). This run's `pypi_conda_names` write is exactly
+    # what might fill that gap in for some of them, so re-arm the whole
+    # `unconvertable` bucket too -- skipped when `changed` is empty, since
+    # nothing about the curated mapping moved this run. See
+    # `reroll_convert.reset_unconvertable`'s docstring for why this is
+    # blanket rather than surgical.
+    reset_stats = {"reset_unconvertable": 0}
+    if changed:
+        print("re-arming unconvertable wheels for another attempt ...", file=sys.stderr)
+        reset_stats = {
+            "reset_unconvertable": _reroll_convert.reset_unconvertable(main_db)
+        }
+        print(f"  reset_unconvertable {reset_stats['reset_unconvertable']:,}", file=sys.stderr)
+
     main_db.close()
 
-    return {**names_stats, **invalidate_stats}
+    return {**names_stats, **invalidate_stats, **reset_stats}
 
 
 def main(argv: list[str] | None = None) -> int:

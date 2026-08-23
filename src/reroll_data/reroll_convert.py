@@ -509,6 +509,50 @@ def reset_errors(main_db: sqlite3.Connection) -> int:
     return n
 
 
+def reset_unconvertable(main_db: sqlite3.Connection) -> int:
+    """Re-arm every `unconvertable` row for another attempt -- the narrow
+    slice of :func:`reset_errors` relevant right after a
+    `reroll_data.refresh_names.refresh` run, rather than a full reroll
+    upgrade.
+
+    `unconvertable` is reroll's own catch-all category for
+    `RerollUnconvertableError` (see :func:`_categorize`), and this repo's
+    single biggest contributor to it is :class:`MissingPypiCondaStaticMapping`
+    -- raised specifically when a dependency resolved to a name not yet
+    curated in `main.db.pypi_conda_names` (module docstring's "The new
+    mapper" section). A `refresh_names.refresh` run is exactly what fills
+    in those curated rows; without re-arming here, a wheel rejected for
+    that reason stays rejected forever, since `convert`'s selection
+    predicate (`conversion_status IS NULL`) never looks at it again.
+
+    There is no persisted record of *which* pypi_name(s) doomed a given
+    `unconvertable` wheel -- only the category string survives `_Result`
+    past one run -- so this is deliberately blanket, not surgical: every
+    `unconvertable` row is re-armed, on the expectation that a wheel whose
+    real blocker was unrelated to naming will simply reproduce the same
+    rejection on the next `convert` pass. Cheap either way relative to
+    `invalidate_wheels`'s own resolutions-scan cost, since `unconvertable`
+    rows carry no `resolutions` to decode in the first place.
+    """
+    now = int(time.time())
+    main_db.execute("BEGIN IMMEDIATE")
+    try:
+        n = (
+            main_db.execute(
+                "UPDATE wheel SET conversion_status = NULL, reroll_data = NULL, "
+                "resolutions = NULL, requires_prerelease = NULL, reroll_version = NULL, "
+                "updated_at = ? WHERE conversion_status = 'unconvertable'",
+                (now,),
+            ).rowcount
+            or 0
+        )
+        main_db.execute("COMMIT")
+    except BaseException:
+        main_db.execute("ROLLBACK")
+        raise
+    return n
+
+
 def reset_stale_version(main_db: sqlite3.Connection, *, current_version: str | None = None) -> int:
     """Re-arm every row (`ok` included) whose `reroll_version` disagrees
     with `current_version` (defaults to the installed `reroll.__version__`)
