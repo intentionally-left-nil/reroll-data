@@ -1,10 +1,9 @@
 """Incremental crawl of every .whl filename on PyPI, into the ``db2`` schema.
 
 Targets ``pypi.db``/``main.db`` (:mod:`reroll_data.db2`) exclusively -- this
-module no longer reads or writes the legacy ``v.db`` (:mod:`reroll_data.db`;
-that migration is done, see :mod:`reroll_data.db2_backfill`). ``wal_monitor``
-is the one thing still borrowed from :mod:`reroll_data.db`, since it has no
-dependency on either schema.
+module no longer reads or writes the legacy ``v.db`` schema (that migration
+is done, see :mod:`reroll_data.db2_backfill`). ``wal_monitor`` comes from
+:mod:`reroll_data.db2` too now.
 
 How the incremental logic works
 --------------------------------
@@ -88,7 +87,6 @@ from pypi_simple import (
     PyPISimple,
 )
 
-from . import db as _db
 from . import db2 as _db2
 from .ratelimit import TokenBucket
 
@@ -711,8 +709,8 @@ def crawl(
     for t in pool:
         t.start()
 
-    check_main_wal = _db.wal_monitor(Path(data_dir) / _db2.MAIN_DB_FILENAME)
-    check_pypi_wal = _db.wal_monitor(Path(data_dir) / _db2.PYPI_DB_FILENAME)
+    check_main_wal = _db2.wal_monitor(Path(data_dir) / _db2.MAIN_DB_FILENAME)
+    check_pypi_wal = _db2.wal_monitor(Path(data_dir) / _db2.PYPI_DB_FILENAME)
 
     started = time.monotonic()
     next_report = started + progress_every

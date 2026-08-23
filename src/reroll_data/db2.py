@@ -1,9 +1,11 @@
 """SQLite storage for the curated, conversion-facing corpus: ``main.db`` and
 ``pypi.db``.
 
-Both live under one ``data_dir`` (default ``data/``, alongside the existing
-crawl database at :data:`reroll_data.db.DEFAULT_DB`, i.e. ``data/v.db``), but
-are **separate files**:
+Both live under one ``data_dir`` (default ``data/``). Historically this sat
+alongside a legacy crawl database, ``data/v.db`` (see
+:mod:`reroll_data.db2_backfill`, which one-off migrated it into these two
+files); ``v.db``'s own schema module has since been removed. ``main.db`` and
+``pypi.db`` are **separate files**:
 
 ``main.db``
     What the conversion job reads and writes -- one small ``wheel`` table
@@ -13,14 +15,12 @@ are **separate files**:
     The raw, as-crawled PyPI index: which projects/files exist, their PEP 658
     METADATA fetch state, and the content-addressed body store.
 
-That split is deliberate, and is the same reasoning as ``v.db`` vs these two:
-SQLite allows exactly **one writer per file**, not per database server (see
-:mod:`reroll_data.db`'s own module docstring). Separate files means separate
-write locks -- the crawl can keep writing `pypi.db` while conversion writes
-`main.db`, with no contention between them, and a notebook holding an idle
-connection open against one cannot stall checkpointing on the other (the
-`-wal` growth failure mode :func:`reroll_data.db.wal_monitor` exists to catch
-in the first place).
+That split is deliberate: SQLite allows exactly **one writer per file**, not
+per database server. Separate files means separate write locks -- the crawl
+can keep writing `pypi.db` while conversion writes `main.db`, with no
+contention between them, and a notebook holding an idle connection open
+against one cannot stall checkpointing on the other (the `-wal` growth
+failure mode :func:`wal_monitor` exists to catch in the first place).
 
 Design history
 ---------------
@@ -131,7 +131,7 @@ No per-file `observed_serial`
     duplication under the crawler's current one-page-at-a-time write
     pattern, so it is not included here. `project.index_serial >
     project.crawled_serial` remains the one staleness signal, unchanged
-    from :mod:`reroll_data.db`.
+    from the legacy ``v.db`` schema this replaced.
 
 ``conversion_status`` doubles as the failure taxonomy
     NULL means outstanding (not yet attempted, or explicitly re-armed for
@@ -152,18 +152,25 @@ No per-file `observed_serial`
 
 Concurrency
 -----------
-Same single-writer-thread model as :mod:`reroll_data.db` -- see that
-module's docstring. Nothing here changes it; it now simply applies to two
-files instead of one.
+SQLite supports exactly **one writer at a time** per file. WAL mode permits
+many concurrent readers alongside that single writer, but two simultaneous
+write transactions will always cause one to fail with ``database is locked``
+(``busy_timeout`` only converts that failure into a blocking retry, which
+serialises them anyway). Every mutation is therefore routed through a single
+dedicated writer thread/process per file; see :mod:`reroll_data.crawl` and
+:mod:`reroll_data.reroll_convert`. This now simply applies to two files
+instead of one.
 """
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
+from typing import Callable
 
-#: Directory both databases live under, alongside `reroll_data.db.DEFAULT_DB`
-#: (`data/v.db`). Each `connect_*` function appends its own filename to this.
+#: Directory both databases live under. Each `connect_*` function appends
+#: its own filename to this.
 DEFAULT_DATA_DIR = Path("data")
 
 MAIN_DB_FILENAME = "main.db"
@@ -254,9 +261,9 @@ CREATE INDEX IF NOT EXISTS wheel_project
     ON wheel(project, filename);
 
 -- Partial index over just the outstanding work. Deliberately a conjunction
--- of two equalities/IS-NULLs -- see reroll_data.db's own schema comments on
--- why SQLite's partial-index prover only reliably matches that shape (an
--- `IN`/`<>` predicate gets ignored and falls back to a full scan). Excludes
+-- of two equalities/IS-NULLs: SQLite's partial-index prover only reliably
+-- matches that shape (an `IN`/`<>` predicate gets ignored and falls back to
+-- a full scan). Excludes
 -- yanked wheels: nothing consumes a yanked wheel's reroll_data under normal
 -- dependency resolution, so it is not worklist work.
 CREATE INDEX IF NOT EXISTS wheel_todo
@@ -275,7 +282,7 @@ CREATE TABLE IF NOT EXISTS meta (
 ) STRICT;
 
 -- One row per project as listed in the root /simple/ index. Unchanged in
--- shape from reroll_data.db's `project` table -- nothing in this schema
+-- shape from the legacy ``v.db`` `project` table -- nothing in this schema
 -- pass touched the crawl's own worklist.
 CREATE TABLE IF NOT EXISTS project (
     -- Display name exactly as returned by the root index (not normalised;
@@ -356,8 +363,8 @@ CREATE TABLE IF NOT EXISTS wheel_metadata (
 
 -- Partial indexes over just the open work, so claiming a batch stays a seek
 -- rather than a scan once most rows are 'done'. Single-equality predicates
--- deliberately -- see reroll_data.db's schema comments on why SQLite's
--- partial-index prover only reliably matches that shape.
+-- deliberately: SQLite's partial-index prover only reliably matches that
+-- shape.
 CREATE INDEX IF NOT EXISTS wheel_metadata_todo
     ON wheel_metadata(attempts)
     WHERE state = 'todo';
@@ -381,8 +388,9 @@ CREATE TABLE IF NOT EXISTS metadata_blob (
     n_bytes     INTEGER NOT NULL,
     codec       TEXT NOT NULL DEFAULT 'zlib6',
     -- BLOB, never TEXT: METADATA is not reliably valid UTF-8 and may carry
-    -- embedded NULs -- see reroll_data.db's own z_body comment for why TEXT
-    -- breaks both ways here.
+    -- embedded NULs. TEXT breaks both ways here: binding a
+    -- surrogateescape-decoded str raises UnicodeEncodeError, and SQLite's
+    -- string functions silently truncate at the first NUL.
     z_body      BLOB NOT NULL,
     -- JSONB: structured METADATA fields (name, version, license,
     -- requires_dist, ...). NULL means not parsed yet, or parsing failed.
@@ -395,10 +403,10 @@ CREATE TABLE IF NOT EXISTS metadata_blob (
 def _connect(path: Path, *, read_only: bool) -> sqlite3.Connection:
     """Open a connection with the pragmas this workload needs.
 
-    Mirrors :func:`reroll_data.db.connect` -- same WAL/synchronous/busy_timeout
-    choices, same directory-creation-on-first-write behaviour. Kept as its
-    own function (rather than importing the other module's) so this module
-    has no import-time dependency on `v.db`'s schema module.
+    Same WAL/synchronous/busy_timeout choices, same
+    directory-creation-on-first-write behaviour as the legacy ``v.db``
+    connector this replaced. Kept as its own function (rather than a shared
+    helper) so this module has no import-time dependency on anything else.
     """
     if not read_only:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -408,6 +416,69 @@ def _connect(path: Path, *, read_only: bool) -> sqlite3.Connection:
     db.execute("PRAGMA busy_timeout=60000")
     db.execute("PRAGMA foreign_keys=ON")
     return db
+
+
+#: Default threshold for :func:`wal_monitor`'s first warning. SQLite's own
+#: automatic checkpoint fires every ~4 MB (`wal_autocheckpoint`'s default of
+#: 1000 pages) and normally keeps `-wal` near that size, so anything reaching
+#: this size means checkpointing has stalled, not just fallen behind briefly.
+WAL_WARN_BYTES = 256 * 1024 * 1024  # 256 MiB
+
+
+def wal_monitor(
+    path: Path | str,
+    *,
+    threshold_bytes: int = WAL_WARN_BYTES,
+    logger: logging.Logger | None = None,
+) -> Callable[[], int]:
+    """Build a callable that logs loudly the first time (and again each time
+    it doubles again past) `<path>-wal` crosses `threshold_bytes`.
+
+    A `-wal` file that keeps growing well past SQLite's own automatic
+    checkpoint threshold almost always means a checkpoint has stopped making
+    progress entirely -- most likely a long-lived reader (an open cursor, or
+    an idle connection from e.g. a notebook) pinning the oldest snapshot the
+    WAL cannot be trimmed past. See `reroll_convert.convert`/
+    `crawl.crawl`/`db2_backfill`, which used to hold exactly such a cursor
+    open for an entire multi-hour run before this was fixed.
+
+    Callers are expected to invoke the returned callable periodically (e.g.
+    once per progress report, not once per row) -- the doubling threshold
+    keeps this from spamming the log even if called often while the WAL
+    stays oversized for a long time.
+
+    Schema-agnostic: takes a bare database path, so it works the same for
+    `main.db`, `pypi.db`, or (during migration) the legacy `v.db`.
+    """
+    log = logger or logging.getLogger(__name__)
+    wal_path = Path(str(path) + "-wal")
+    next_warn = threshold_bytes
+
+    def check() -> int:
+        nonlocal next_warn
+        try:
+            size = wal_path.stat().st_size
+        except FileNotFoundError:
+            return 0
+        if size >= next_warn:
+            log.warning(
+                "%s has grown to %.0f MiB (>= %.0f MiB threshold) -- "
+                "checkpointing looks stuck. Likely cause: a long-lived "
+                "reader (an open cursor or idle connection) pinning the WAL "
+                "snapshot -- check `lsof %s*` for other open connections. "
+                "Once nothing else has the db open: "
+                "sqlite3 %s \"PRAGMA wal_checkpoint(TRUNCATE);\"",
+                wal_path,
+                size / (1024 * 1024),
+                next_warn / (1024 * 1024),
+                path,
+                path,
+            )
+            while size >= next_warn:
+                next_warn *= 2
+        return size
+
+    return check
 
 
 def connect_main(

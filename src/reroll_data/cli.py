@@ -3,19 +3,14 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import zlib
 from pathlib import Path
 
-from . import backfill as _backfill
 from . import crawl as _crawl
-from . import db as _db
 from . import db2 as _db2
 from . import metadata as _metadata
-from . import repodata_sync as _repodata_sync
 from . import reroll_convert as _reroll_convert
-from . import retry_metadata_conversion as _retry_metadata_conversion
 
 
 def _fmt(stats: dict) -> str:
@@ -23,11 +18,9 @@ def _fmt(stats: dict) -> str:
 
 
 def cmd_db_init(args: argparse.Namespace) -> int:
-    """Create `main.db`/`pypi.db` (the new per-database schema) if missing.
+    """Create `main.db`/`pypi.db` (the per-database schema) if missing.
 
-    Deliberately separate from the legacy `--db`/`reroll_data.db` (`v.db`)
-    machinery every other command uses -- see `reroll_data.db2`'s module
-    docstring. Non-destructive: `db2.init_main`/`init_pypi` only ever run
+    Non-destructive: `db2.init_main`/`init_pypi` only ever run
     `CREATE TABLE/INDEX IF NOT EXISTS` against an existing file, and raise
     `SchemaMismatch` instead of altering a table whose shape has drifted.
     """
@@ -46,11 +39,7 @@ def cmd_db_init(args: argparse.Namespace) -> int:
 
 
 def cmd_refresh(args: argparse.Namespace) -> int:
-    """Fetch the root index into `pypi.db`/`main.db` (see `reroll_data.db2`).
-
-    Targets the new per-database schema exclusively -- `refresh`/`crawl`
-    no longer touch the legacy `--db`/`v.db` at all.
-    """
+    """Fetch the root index into `pypi.db`/`main.db` (see `reroll_data.db2`)."""
     pypi_db = _db2.connect_pypi(args.data_dir)
     main_db = _db2.connect_main(args.data_dir)
     _db2.init_pypi(pypi_db)
@@ -114,10 +103,15 @@ def cmd_sync_consistency(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    db = _db.connect(args.db, read_only=True)
-    _db.init(db)
-    s = _db.stats(db)
-    s["index_serial"] = int(_db.get_meta(db, "index_serial") or 0)
+    """Show crawl + metadata counts, sourced from `pypi.db` (`reroll_data.db2`).
+
+    See `_db2.stats_pypi` for the full breakdown (projects/pending files/
+    yanked/metadata state/blobs).
+    """
+    db = _db2.connect_pypi(args.data_dir, read_only=True)
+    _db2.init_pypi(db)
+    s = _db2.stats_pypi(db)
+    s["index_serial"] = int(_db2.get_meta(db, "index_serial") or 0)
     print(_fmt(s))
     db.close()
     return 0
@@ -204,55 +198,9 @@ def cmd_metadata_show(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_metadata_backfill(args: argparse.Namespace) -> int:
-    out = _backfill.backfill_parsed(
-        Path(args.db),
-        workers=args.workers,
-        limit=args.limit,
-        read_batch=args.batch_size,
-    )
-    print("backfill finished:", file=sys.stderr)
-    print(_fmt(out), file=sys.stderr)
-    return 1 if out.get("interrupted") else 0
-
-
-def cmd_metadata_retry_conversion(args: argparse.Namespace) -> int:
-    out = _retry_metadata_conversion.retry_metadata_conversion(
-        Path(args.db), args.sha256
-    )
-    print(
-        f"blob {out['sha256']} (id {out['id']}): "
-        f"{'parsed' if out['parsed'] else 'failed to parse'}",
-        file=sys.stderr,
-    )
-    return 0 if out["parsed"] else 1
-
-
-def cmd_repodata_sync(args: argparse.Namespace) -> int:
-    db = _db.connect(args.db)
-    _db.init(db)
-    print("reconciling wheel -> repodata_conversion ...", file=sys.stderr)
-    info = _repodata_sync.sync(db)
-    print("sync finished:", file=sys.stderr)
-    print(_fmt(info), file=sys.stderr)
-    print(_fmt(_db.repodata_conversion_stats(db)), file=sys.stderr)
-    db.close()
-    return 0
-
-
-def cmd_repodata_status(args: argparse.Namespace) -> int:
-    db = _db.connect(args.db, read_only=True)
-    _db.init(db)
-    print(_fmt(_db.repodata_conversion_stats(db)))
-    db.close()
-    return 0
-
-
 def cmd_reroll_status(args: argparse.Namespace) -> int:
     """Show reroll's own conversion counts, sourced from `main.db.wheel`
-    (`reroll_data.db2`) -- the `convert`/`reroll_convert` state, not the
-    legacy `v.db`/`repodata_conversion` table `repodata reroll-convert` used
-    to populate. See `_db2.stats_main` for the category breakdown
+    (`reroll_data.db2`). See `_db2.stats_main` for the category breakdown
     (outstanding/ok/scope/invalid/unconvertable/unavailable/unexpected).
     """
     db = _db2.connect_main(args.data_dir, read_only=True)
@@ -272,8 +220,7 @@ def cmd_reroll_status(args: argparse.Namespace) -> int:
 
 def cmd_convert(args: argparse.Namespace) -> int:
     """Run reroll's own translator over every outstanding `main.db.wheel`
-    row -- the `main.db`/`pypi.db` (db2) replacement for the old,
-    `v.db`-based `repodata reroll-convert`. See `reroll_data.reroll_convert`.
+    row. See `reroll_data.reroll_convert`.
     """
     main_db = _db2.connect_main(args.data_dir)
     _db2.init_main(main_db)
@@ -303,51 +250,10 @@ def cmd_convert(args: argparse.Namespace) -> int:
     return 1 if out.get("interrupted") else 0
 
 
-def cmd_export(args: argparse.Namespace) -> int:
-    db = _db.connect(args.db, read_only=True)
-    sql = "SELECT project, filename, yanked FROM wheel"
-    if not args.include_yanked:
-        sql += " WHERE yanked = 0"
-    sql += " ORDER BY project, filename"
-
-    out = sys.stdout if args.output == "-" else open(args.output, "w", encoding="utf-8")
-    n = 0
-    try:
-        if args.format == "jsonl":
-            for project, filename, yanked in db.execute(sql):
-                out.write(
-                    json.dumps(
-                        {
-                            "project": project,
-                            "filename": filename,
-                            "yanked": bool(yanked),
-                        },
-                        separators=(",", ":"),
-                    )
-                    + "\n"
-                )
-                n += 1
-        else:  # tsv
-            for project, filename, _ in db.execute(sql):
-                out.write(f"{project}\t{filename}\n")
-                n += 1
-    finally:
-        if out is not sys.stdout:
-            out.close()
-        db.close()
-    print(f"exported {n:,} wheels to {args.output}", file=sys.stderr)
-    return 0
-
-
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="reroll-data",
         description="Incrementally scrape every .whl filename on PyPI into SQLite.",
-    )
-    p.add_argument(
-        "--db",
-        default=str(_db.DEFAULT_DB),
-        help=f"SQLite database path (default: {_db.DEFAULT_DB})",
     )
     p.add_argument(
         "--endpoint",
@@ -363,9 +269,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-dir",
         default=str(_db2.DEFAULT_DATA_DIR),
         help=(
-            "directory main.db/pypi.db live under -- used by `db init`, "
-            "`refresh`, `crawl`, `sync-consistency`, `convert`, and "
-            "`metadata sync`/`fetch`/`status`/`show` "
+            "directory main.db/pypi.db live under -- used by every "
+            "subcommand here "
             f"(default: {_db2.DEFAULT_DATA_DIR})"
         ),
     )
@@ -373,13 +278,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     d = sub.add_parser(
         "db",
-        help="manage main.db/pypi.db -- the new per-database schema (reroll_data.db2)",
+        help="manage main.db/pypi.db (reroll_data.db2)",
     )
     dsub = d.add_subparsers(dest="db_command", required=True)
 
     di = dsub.add_parser(
         "init",
-        help="create main.db and pypi.db if missing (non-destructive; leaves v.db alone)",
+        help="create main.db and pypi.db if missing (non-destructive)",
     )
     di.set_defaults(func=cmd_db_init)
 
@@ -418,7 +323,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sc.set_defaults(func=cmd_sync_consistency)
 
-    s = sub.add_parser("status", help="show counts")
+    s = sub.add_parser("status", help="show crawl + metadata counts (pypi.db)")
     s.set_defaults(func=cmd_status)
 
     m = sub.add_parser("metadata", help="download PEP 658 core-metadata bodies")
@@ -475,62 +380,12 @@ def build_parser() -> argparse.ArgumentParser:
     mw.add_argument("filename", help="wheel filename")
     mw.set_defaults(func=cmd_metadata_show)
 
-    mb = msub.add_parser(
-        "backfill",
-        help="one-off: parse stored bodies into parsed_json (local, no network)",
-    )
-    mb.add_argument(
-        "--workers",
-        type=int,
-        default=None,
-        help="worker processes (default: all cores, via os.process_cpu_count())",
-    )
-    mb.add_argument(
-        "--limit", type=int, default=None, help="only backfill N blobs"
-    )
-    mb.add_argument(
-        "--batch-size",
-        type=int,
-        default=_backfill.READ_BATCH,
-        help="blobs read/committed per round trip (default: %(default)s)",
-    )
-    mb.set_defaults(func=cmd_metadata_backfill)
-
-    mr = msub.add_parser(
-        "retry-conversion",
-        help="one-off: force re-parse one blob's parsed_json (local, no network)",
-    )
-    mr.add_argument("sha256", help="metadata_blob.sha256 digest to re-parse")
-    mr.set_defaults(func=cmd_metadata_retry_conversion)
-
-    e = sub.add_parser("export", help="dump wheel filenames")
-    e.add_argument("-o", "--output", default="-", help="output path, or - for stdout")
-    e.add_argument("--format", choices=("tsv", "jsonl"), default="tsv")
-    e.add_argument("--include-yanked", action="store_true")
-    e.set_defaults(func=cmd_export)
-
-    rp = sub.add_parser(
-        "repodata",
-        help="repodata_conversion bookkeeping -- legacy v.db table, kept for reference only",
-    )
-    rpsub = rp.add_subparsers(dest="repodata_command", required=True)
-
-    rps = rpsub.add_parser(
-        "sync",
-        help="reconcile wheel -> repodata_conversion (idempotent, resumable)",
-    )
-    rps.set_defaults(func=cmd_repodata_sync)
-
-    rpt = rpsub.add_parser("status", help="show repodata_conversion counts")
-    rpt.set_defaults(func=cmd_repodata_status)
-
     rs = sub.add_parser(
         "reroll-status",
         help=(
             "show reroll's own conversion counts by category "
             "(scope/invalid/unconvertable/unavailable/unexpected/ok/outstanding), "
-            "plus coverage and unconvertable percentages -- from main.db.wheel "
-            "(main.db/pypi.db, db2), not the legacy v.db"
+            "plus coverage and unconvertable percentages, from main.db.wheel"
         ),
     )
     rs.set_defaults(func=cmd_reroll_status)

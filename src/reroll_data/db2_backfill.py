@@ -11,10 +11,10 @@ migration's own brief:
   comparison has since been removed entirely) is **not** copied at all --
   there is no equivalent table in :mod:`reroll_data.db2`'s schema. This is
   "reroll data"/"error data" and stays behind in ``v.db``.
-* ``metadata_blob.parsed_json`` (reroll's parse of a stored METADATA body,
-  see :mod:`reroll_data.backfill`) is **not** copied -- also a product of the
-  reroll conversion step. Every migrated row's ``parsed_json`` is left NULL;
-  a fresh backfill against the new ``pypi.db`` repopulates it later if
+* ``metadata_blob.parsed_json`` (reroll's parse of a stored METADATA body)
+  is **not** copied -- also a product of the reroll conversion step. Every
+  migrated row's ``parsed_json`` is left NULL; a fresh backfill against the
+  new ``pypi.db`` repopulates it later if
   wanted.
 * ``pypi_conda_names`` (the pypi->conda name mapping) is untouched --
   outside this migration's scope entirely, per the module docstring of
@@ -140,8 +140,25 @@ import sys
 import time
 from pathlib import Path
 
-from . import db as _db
 from . import db2 as _db2
+
+#: Default path of the legacy `v.db` corpus this migrates *from*. `v.db`'s
+#: own schema module has been removed (this migration is the last thing that
+#: still reads it), so the path default lives here now instead.
+DEFAULT_LEGACY_DB = Path("data/v.db")
+
+
+def _connect_legacy_readonly(path: Path | str) -> sqlite3.Connection:
+    """Open the legacy `v.db` corpus read-only.
+
+    Same pragmas the old, now-removed `reroll_data.db` schema module's
+    `connect()` used, minus anything write-related (no mkdir, no
+    `foreign_keys` -- this migration never writes back to `v.db`).
+    """
+    db = sqlite3.connect(Path(path), timeout=60.0, isolation_level=None)
+    db.execute("PRAGMA query_only=ON")
+    db.execute("PRAGMA busy_timeout=60000")
+    return db
 
 #: Rows per read/write round trip. One number for every step except
 #: `metadata_blob`, whose rows carry a compressed METADATA body (`z_body`)
@@ -366,7 +383,7 @@ def migrate_project(
     )
 
     last_name = _load_scalar_cursor(pypi_db, _CURSOR_PROJECT, "")
-    check_wal = _db.wal_monitor(_pypi_path(pypi_db))
+    check_wal = _db2.wal_monitor(_pypi_path(pypi_db))
     migrated = 0
     started = time.monotonic()
     next_report = started + progress_every
@@ -415,7 +432,7 @@ def migrate_project(
 #: Interim workaround for the raw-name-rename duplication described in
 #: `migrate_wheel`'s docstring: skip every `wheel` row whose `project` is
 #: currently `status = 'gone'` in `v.db.project`. `project.name` is that
-#: table's own `TEXT PRIMARY KEY` (see `reroll_data.db`), so this `EXISTS`
+#: table's own `TEXT PRIMARY KEY`, so this `EXISTS`
 #: is an indexed point lookup per row, not a scan.
 _SKIP_GONE_PROJECT = "EXISTS (SELECT 1 FROM project p WHERE p.name = wheel.project AND p.status = 'gone')"
 
@@ -482,8 +499,8 @@ def migrate_wheel(
     )
 
     last_project, last_filename = _load_pair_cursor(pypi_db, _CURSOR_WHEEL)
-    check_main_wal = _db.wal_monitor(_main_path(main_db))
-    check_pypi_wal = _db.wal_monitor(_pypi_path(pypi_db))
+    check_main_wal = _db2.wal_monitor(_main_path(main_db))
+    check_pypi_wal = _db2.wal_monitor(_pypi_path(pypi_db))
     migrated = 0
     started = time.monotonic()
     next_report = started + progress_every
@@ -621,7 +638,7 @@ def migrate_wheel_metadata(
     )
 
     last_project, last_filename = _load_pair_cursor(pypi_db, _CURSOR_WHEEL_METADATA)
-    check_wal = _db.wal_monitor(_pypi_path(pypi_db))
+    check_wal = _db2.wal_monitor(_pypi_path(pypi_db))
     migrated = 0
     started = time.monotonic()
     next_report = started + progress_every
@@ -720,7 +737,7 @@ def migrate_metadata_blob(
     )
 
     last_id = _load_scalar_cursor(pypi_db, _CURSOR_METADATA_BLOB, 0)
-    check_wal = _db.wal_monitor(_pypi_path(pypi_db))
+    check_wal = _db2.wal_monitor(_pypi_path(pypi_db))
     migrated = 0
     z_bytes = 0
     started = time.monotonic()
@@ -808,7 +825,7 @@ def migrate_all(
     (if given) caps *each* step separately, for a small trial run before
     letting this loose on the full corpus.
     """
-    v_db = _db.connect(v_db_path, read_only=True)
+    v_db = _connect_legacy_readonly(v_db_path)
     main_db = _db2.connect_main(data_dir)
     pypi_db = _db2.connect_pypi(data_dir)
     _db2.init_main(main_db)
@@ -847,9 +864,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--db",
-        default=str(_db.DEFAULT_DB),
+        default=str(DEFAULT_LEGACY_DB),
         type=Path,
-        help=f"legacy v.db path to migrate from (default: {_db.DEFAULT_DB})",
+        help=f"legacy v.db path to migrate from (default: {DEFAULT_LEGACY_DB})",
     )
     parser.add_argument(
         "--data-dir",

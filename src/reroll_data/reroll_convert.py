@@ -145,7 +145,6 @@ from reroll.stages import get_wheel_records, parse_metadata
 from reroll.wheel_metadata import WheelMetadata
 from reroll.wheel_record import WheelRecord
 
-from . import db as _db
 from . import db2 as _db2
 
 #: Attributed `Winner.mapper` for a hit against `main.db.pypi_conda_names`.
@@ -305,8 +304,8 @@ def _load_metadata(
     `pypi.db`.
 
     Prefers the already-parsed `metadata_blob.parsed_json` -- itself just a
-    `WheelMetadata.model_dump_json()` from whichever run of
-    `reroll_data.metadata.fetch`/`backfill` first produced it -- over
+    `WheelMetadata.model_dump_json()` from whichever `reroll_data.metadata.fetch`
+    run first produced it -- over
     re-decompressing and re-parsing `z_body`: both paths run the identical
     `parse_metadata` code over the identical bytes, so preferring the cached
     result only skips duplicated work, never a different code path. Falls
@@ -557,7 +556,7 @@ def convert(
     interrupted = False
     runtime_error: tuple[int, str] | None = None
     remaining_limit = limit
-    check_wal = _db.wal_monitor(data_dir / _db2.MAIN_DB_FILENAME)
+    check_wal = _db2.wal_monitor(data_dir / _db2.MAIN_DB_FILENAME)
 
     pending_writes: list[tuple[int, str | None, str | None, int | None, str | None]] = []
     #: pypi_names to seed as `(name, NULL, NULL)`, deduped across the whole
@@ -630,7 +629,7 @@ def convert(
                 if n <= 0:
                     break
                 # Re-issued fresh every batch, fully drained by `fetchall()`
-                # -- see `reroll_data.db.wal_monitor`'s docstring on why an
+                # -- see `reroll_data.db2.wal_monitor`'s docstring on why an
                 # unfinished SELECT left open across a whole run pins the
                 # WAL. `wheel_todo` (`WHERE conversion_status IS NULL AND
                 # yanked = 0`) covers this exactly.

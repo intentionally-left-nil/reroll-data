@@ -295,11 +295,11 @@ def stats(db: sqlite3.Connection, *, include_bytes: bool = False) -> dict[str, i
     """Counts for the metadata state machine, against `pypi.db`.
 
     `wheel_metadata.state` and `metadata_blob`'s own columns are unchanged
-    in shape between the legacy `v.db` schema and this one -- only the
+    in shape from the legacy `v.db` schema this replaced -- only the
     surrounding tables (`pypi_index` vs `wheel`) and the two content
-    digests' storage type (BLOB here, hex TEXT there) differ -- so this is
-    the same query `reroll_data.db.metadata_stats` ran, just against a
-    `pypi.db` connection instead.
+    digests' storage type (BLOB here, hex TEXT there) differ -- so this
+    runs the same query the old schema's `metadata_stats` did, just against
+    a `pypi.db` connection instead.
 
     `include_bytes` is opt-in because summing over `metadata_blob` has to
     walk every leaf page of a table that grows to tens of GB, which takes
