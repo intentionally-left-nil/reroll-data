@@ -249,9 +249,15 @@ def cmd_repodata_status(args: argparse.Namespace) -> int:
 
 
 def cmd_reroll_status(args: argparse.Namespace) -> int:
-    db = _db.connect(args.db, read_only=True)
-    _db.init(db)
-    s = _db.reroll_status_stats(db)
+    """Show reroll's own conversion counts, sourced from `main.db.wheel`
+    (`reroll_data.db2`) -- the `convert`/`reroll_convert` state, not the
+    legacy `v.db`/`repodata_conversion` table `repodata reroll-convert` used
+    to populate. See `_db2.stats_main` for the category breakdown
+    (outstanding/ok/scope/invalid/unconvertable/unavailable/unexpected).
+    """
+    db = _db2.connect_main(args.data_dir, read_only=True)
+    _db2.init_main(db)
+    s = _db2.stats_main(db)
     db.close()
     print(_fmt(s))
     ok, unconvertable, wheels = s["ok"], s["unconvertable"], s["wheels"]
@@ -505,10 +511,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     rp = sub.add_parser(
         "repodata",
-        help=(
-            "repodata_conversion bookkeeping -- legacy v.db table, kept for "
-            "reroll's own historical conversion stats (see reroll-status)"
-        ),
+        help="repodata_conversion bookkeeping -- legacy v.db table, kept for reference only",
     )
     rpsub = rp.add_subparsers(dest="repodata_command", required=True)
 
@@ -521,15 +524,16 @@ def build_parser() -> argparse.ArgumentParser:
     rpt = rpsub.add_parser("status", help="show repodata_conversion counts")
     rpt.set_defaults(func=cmd_repodata_status)
 
-    rrs = rpsub.add_parser(
+    rs = sub.add_parser(
         "reroll-status",
         help=(
-            "show reroll's own conversion counts by error category "
-            "(scope/invalid/unconvertable/runtime/unavailable/unexpected/ok), "
-            "plus coverage and unconvertable percentages"
+            "show reroll's own conversion counts by category "
+            "(scope/invalid/unconvertable/unavailable/unexpected/ok/outstanding), "
+            "plus coverage and unconvertable percentages -- from main.db.wheel "
+            "(main.db/pypi.db, db2), not the legacy v.db"
         ),
     )
-    rrs.set_defaults(func=cmd_reroll_status)
+    rs.set_defaults(func=cmd_reroll_status)
 
     cv = sub.add_parser(
         "convert",
