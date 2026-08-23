@@ -12,11 +12,11 @@ LIMIT   ?=
 # one-off migration reads from. Only used by that target.
 DB ?= data/v.db
 
-# reroll-convert (see reroll_data.reroll_convert): purely local CPU work,
+# sync-reroll (see reroll_data.reroll_convert): purely local CPU work,
 # runs in the ordinary uv venv -- `reroll` is an ordinary, required
 # dependency, kept current by a plain `uv sync`. Left empty by default so
 # the tool's own default (all cores) applies, e.g.
-# `make reroll-convert REROLL_WORKERS=4`.
+# `make sync-reroll REROLL_WORKERS=4`.
 REROLL_WORKERS ?=
 
 RUN         := uv run reroll-data --data-dir $(DATA_DIR)
@@ -27,7 +27,7 @@ REROLL_WORKERS_FLAG = $(if $(REROLL_WORKERS),--workers $(REROLL_WORKERS),)
 	db-init db2-backfill \
 	refresh crawl sync-filenames sync-consistency \
 	metadata-status metadata-sync metadata-fetch sync-metadata \
-	reroll-convert reroll-status \
+	sync-reroll reroll-status \
 	refresh-mapping
 
 help:
@@ -37,7 +37,7 @@ help:
 	@echo "  sync-filenames    refresh + crawl -- discover and fetch .whl filenames (main.db/pypi.db)"
 	@echo "  sync-consistency  rare: full reconciliation of main.db.wheel against pypi.db.pypi_index"
 	@echo "  sync-metadata     metadata sync + fetch -- download METADATA bodies"
-	@echo "  reroll-convert    run reroll's own translator over every outstanding main.db.wheel row, always retrying past errors + stale reroll_version (ordinary uv env)"
+	@echo "  sync-reroll       run reroll's own translator over every outstanding main.db.wheel row, always re-arming unconvertable/unavailable/unexpected errors + stale reroll_version; scope/invalid only clear on a reroll version bump (ordinary uv env)"
 	@echo "  refresh-mapping   re-run reroll's mapper chain over pypi_conda_names, re-arming any affected wheel"
 	@echo "  status            counts for the wheel/project crawl (pypi.db)"
 	@echo "  metadata-status   counts for the metadata download"
@@ -130,20 +130,26 @@ sync-metadata:
 # reroll is a normal, required dependency here, kept current by a plain
 # `uv sync`.
 #
-# Always passes --retry-errors, so every run also re-arms and re-attempts
-# every wheel with a settled (non-runtime) reroll_errors row -- fine as a
-# no-op when there are none, and means a `pypi_conda_names` curation pass or a
-# reroll fix takes effect on the very next `make reroll-convert` with no
-# separate step. Always passes --retry-stale-version too, so a `py-reroll`
-# upgrade automatically re-attempts every row (including previously-`ok`
-# ones) its own last run's reroll_version disagrees with. Deliberately does
-# *not* pass --allow-pre: the job itself already retries a genuine
-# pre-release rejection with allow_pre=True on its own (see
-# reroll_data.reroll_convert's "Pre-release retry" docstring section) --
-# forcing it on for every wheel up front would just mean paying for a second
-# attempt reroll's own retry logic already limits to the wheels that
-# actually need it.
-reroll-convert:
+# Always passes --retry-errors, but that only re-arms the settled
+# reroll_errors categories a fresh attempt can plausibly resolve without
+# reroll itself changing: unconvertable (a pypi_conda_names curation pass
+# can supply a mapping that was missing), unavailable (metadata just hadn't
+# finished downloading yet), and unexpected (an unclassified exception
+# worth a fresh look) -- fine as a no-op when there are none of those.
+# scope and invalid are deliberately left alone here: both are stable
+# verdicts about the wheel itself that unchanged reroll logic would just
+# re-reject identically, so this target never wastes a pass re-attempting
+# them. Always passes --retry-stale-version too, so a `py-reroll` upgrade
+# automatically re-attempts *every* row regardless of category (scope/invalid
+# included, and previously-`ok` ones) whose own last run's reroll_version
+# disagrees with the one now installed -- that is the only thing that
+# re-arms scope/invalid. Deliberately does *not* pass --allow-pre: the job
+# itself already retries a genuine pre-release rejection with
+# allow_pre=True on its own (see reroll_data.reroll_convert's "Pre-release
+# retry" docstring section) -- forcing it on for every wheel up front would
+# just mean paying for a second attempt reroll's own retry logic already
+# limits to the wheels that actually need it.
+sync-reroll:
 	$(RUN) convert --retry-errors --retry-stale-version $(REROLL_WORKERS_FLAG) $(LIMIT_FLAG)
 
 # --------------------------------------------------------------------------- #
@@ -155,6 +161,6 @@ reroll-convert:
 # disagrees, then re-arms any main.db.wheel row whose resolutions used a
 # name that changed. Idempotent but not incremental -- every run re-checks
 # the whole table. Run on its own schedule (e.g. weekly), then
-# `make reroll-convert` to pick up whatever this re-armed.
+# `make sync-reroll` to pick up whatever this re-armed.
 refresh-mapping:
 	$(RUN) names refresh $(LIMIT_FLAG)

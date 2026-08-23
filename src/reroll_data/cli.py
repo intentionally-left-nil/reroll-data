@@ -230,7 +230,11 @@ def cmd_convert(args: argparse.Namespace) -> int:
     _db2.init_main(main_db)
     if args.retry_errors:
         rearmed = _reroll_convert.reset_errors(main_db)
-        print(f"re-armed {rearmed:,} previously-failed wheels", file=sys.stderr)
+        print(
+            f"re-armed {rearmed:,} wheels previously marked "
+            "unconvertable/unavailable/unexpected",
+            file=sys.stderr,
+        )
     if args.retry_stale_version:
         rearmed = _reroll_convert.reset_stale_version(main_db)
         print(
@@ -423,7 +427,10 @@ def build_parser() -> argparse.ArgumentParser:
     cv.add_argument(
         "--retry-errors",
         action="store_true",
-        help="also re-attempt wheels previously marked with a settled (non-runtime) error",
+        help=(
+            "also re-attempt wheels marked unconvertable/unavailable/unexpected "
+            "(not scope/invalid, which only clear via --retry-stale-version)"
+        ),
     )
     cv.add_argument(
         "--retry-stale-version",

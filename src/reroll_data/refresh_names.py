@@ -9,7 +9,7 @@ immediately, never second-guessed), this job runs the live chain itself
 and writes its answer *into* `pypi_conda_names`, unconditionally
 overwriting whatever was there before. Deliberately a separate, human
 (or cron-)triggered job -- run it (e.g. weekly) on your own schedule, not
-as part of every `reroll-convert`, precisely because it changes what
+as part of every `sync-reroll`, precisely because it changes what
 `reroll_convert`'s next run will treat as curated truth.
 
 One mapper build for the whole run

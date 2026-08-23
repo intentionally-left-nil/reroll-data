@@ -133,9 +133,16 @@ against `main.db.reroll_errors` (excluding `category = 'runtime'`, which
 never settles a wheel) -- see :data:`reroll_data.db2.OUTSTANDING_WHEEL`. A
 row that already succeeded or settled on a failure simply stops matching --
 no lease/claim machinery needed, the same reasoning as the `v.db`-based
-predecessor. `reset_errors` re-arms every wheel with a settled
-(non-`runtime`) error; `reset_stale_version` re-arms rows an older reroll
-produced.
+predecessor. `reset_errors` re-arms every wheel whose settled error is in
+:data:`RETRYABLE_CATEGORIES` -- `unconvertable`, `unavailable`, and
+`unexpected`, each of which a fresh attempt can plausibly resolve without
+reroll itself changing. `scope` and `invalid` are deliberately *not*
+included: both are stable verdicts about the wheel itself (out of reroll's
+supported scope; structurally broken) that unchanged reroll logic would
+just re-reject identically, so `reset_errors` leaves them settled.
+`reset_stale_version` is the only thing that re-arms those two -- it
+re-arms rows an older reroll produced, regardless of category, since a
+genuine reroll upgrade can change any of these verdicts.
 """
 
 from __future__ import annotations
@@ -186,6 +193,30 @@ STATIC_MAPPER_NAME = "pypi_conda_names_mapper"
 #: `reroll_data.db2.MAIN_SCHEMA`'s `reroll_errors.category` CHECK constraint
 #: exactly.
 CATEGORIES = ("scope", "invalid", "unconvertable", "unavailable", "unexpected", "runtime")
+
+#: The subset of :data:`CATEGORIES` that :func:`reset_errors` re-arms on an
+#: ordinary run -- every category whose rejection a fresh attempt can
+#: plausibly overturn without reroll itself changing:
+#:
+#: * `"unconvertable"` -- a `pypi_conda_names` curation pass (run
+#:   separately, see `reroll_data.refresh_names`) can supply a mapping that
+#:   was missing before.
+#: * `"unavailable"` -- not a reroll rejection at all, just metadata that
+#:   hadn't finished downloading yet (see :class:`MetadataUnavailable`); the
+#:   very next `reroll_data.metadata.fetch` run can resolve it with reroll
+#:   completely unchanged.
+#: * `"unexpected"` -- an uncaught, unclassified exception, not a confirmed
+#:   permanent verdict, so worth a fresh look on every run.
+#:
+#: Deliberately excludes `"scope"` and `"invalid"`: both are stable
+#: judgements about the wheel itself (out of reroll's supported scope;
+#: structurally broken) that unchanged reroll logic would just re-reject
+#: identically -- re-attempting them on every ordinary run would only waste
+#: time reproducing the same failure. Those two are only re-armed by a
+#: genuine reroll upgrade, via :func:`reset_stale_version`. `"runtime"` is
+#: excluded too, but for a different reason -- it never settles a wheel in
+#: the first place (see module docstring), so there is nothing to re-arm.
+RETRYABLE_CATEGORIES = ("unconvertable", "unavailable", "unexpected")
 
 #: Rows pulled from `main.db.wheel` per round trip / progress report.
 READ_BATCH = 2000
@@ -510,24 +541,32 @@ def _convert_one(item: tuple[int, str]) -> _Result:
 
 
 def reset_errors(main_db: sqlite3.Connection) -> int:
-    """Re-arm every wheel with a settled (non-`runtime`) error for another
-    attempt.
+    """Re-arm every wheel whose settled error's category is in
+    :data:`RETRYABLE_CATEGORIES` for another attempt.
 
-    Mirrors the previous version of this module's `reset_errors`: `convert`'s
-    selection predicate excludes any wheel with a settled `reroll_errors`
-    row, so a wheel that failed once is otherwise skipped forever. Only
-    relevant after a reroll fix or a `pypi_conda_names` curation pass --
-    re-running `convert()` unmodified would just reproduce the same
-    rejections. Deliberately leaves `runtime`-only rows alone -- those never
-    excluded the wheel from the worklist in the first place (see module
-    docstring), so there is nothing to re-arm.
+    `convert()`'s selection predicate excludes any wheel with a settled
+    `reroll_errors` row, so a wheel that failed once is otherwise skipped
+    forever. Unlike an earlier version of this function (which re-armed
+    *every* settled, non-`runtime` category), this is deliberately narrower:
+    `"scope"` and `"invalid"` are stable verdicts about the wheel itself
+    that unchanged reroll logic would just re-reject identically, so this
+    leaves those settled -- only a genuine reroll upgrade (`reset_stale_version`)
+    re-arms them. `"unconvertable"`, `"unavailable"`, and `"unexpected"`, by
+    contrast, can plausibly resolve on a fresh attempt without reroll itself
+    changing -- e.g. after a reroll fix or a `pypi_conda_names` curation
+    pass -- so those stay re-armed on every call, same as before. See
+    `RETRYABLE_CATEGORIES`'s own docstring for the full reasoning per
+    category. Deliberately leaves `runtime`-only rows alone too -- those
+    never excluded the wheel from the worklist in the first place (see
+    module docstring), so there is nothing to re-arm.
 
     The `wheel` `UPDATE` runs first, while its `reroll_errors` subquery still
     sees the about-to-be-cleared rows; the `DELETE` that actually clears them
-    runs after, using the same `category <> 'runtime'` predicate (unaffected
-    by the `UPDATE`, which never touches `reroll_errors`) -- so the two
+    runs after, using the same `category IN (...)` predicate (unaffected by
+    the `UPDATE`, which never touches `reroll_errors`) -- so the two
     statements can't disagree about which rows they mean.
     """
+    placeholders = ", ".join("?" for _ in RETRYABLE_CATEGORIES)
     now = int(time.time())
     main_db.execute("BEGIN IMMEDIATE")
     try:
@@ -536,12 +575,15 @@ def reset_errors(main_db: sqlite3.Connection) -> int:
                 "UPDATE wheel SET reroll_data = NULL, resolutions = NULL, "
                 "requires_prerelease = NULL, reroll_version = NULL, updated_at = ? "
                 "WHERE id IN ("
-                "SELECT wheel_id FROM reroll_errors WHERE category <> 'runtime')",
-                (now,),
+                f"SELECT wheel_id FROM reroll_errors WHERE category IN ({placeholders}))",
+                (now, *RETRYABLE_CATEGORIES),
             ).rowcount
             or 0
         )
-        main_db.execute("DELETE FROM reroll_errors WHERE category <> 'runtime'")
+        main_db.execute(
+            f"DELETE FROM reroll_errors WHERE category IN ({placeholders})",
+            RETRYABLE_CATEGORIES,
+        )
         main_db.execute("COMMIT")
     except BaseException:
         main_db.execute("ROLLBACK")
@@ -574,6 +616,14 @@ def reset_unconvertable(main_db: sqlite3.Connection) -> int:
     rows; without re-arming here, a wheel rejected for that reason stays
     rejected forever, since `convert`'s selection predicate never looks at a
     settled `reroll_errors` row again.
+
+    Note that :func:`reset_errors` (run on every ordinary `convert`
+    invocation, via `--retry-errors`) already re-arms the *whole*
+    `unconvertable` category, this sub-category included -- so this
+    function only matters for a caller that wants to re-arm just the
+    curation-fixable slice without touching anything else, as
+    `refresh_names.refresh` does immediately after a curation pass, ahead
+    of whatever `convert` run happens next.
     """
     sub_category = MissingPypiCondaStaticMapping.__name__
     now = int(time.time())
@@ -917,7 +967,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--retry-errors",
         action="store_true",
-        help="also re-attempt wheels previously marked with a settled (non-runtime) error",
+        help=(
+            "also re-attempt wheels marked unconvertable/unavailable/unexpected "
+            "(not scope/invalid, which only clear via --retry-stale-version)"
+        ),
     )
     parser.add_argument(
         "--retry-stale-version",
@@ -938,7 +991,11 @@ def main(argv: list[str] | None = None) -> int:
     _db2.init_main(main_db)
     if args.retry_errors:
         rearmed = reset_errors(main_db)
-        print(f"re-armed {rearmed:,} previously-failed wheels", file=sys.stderr)
+        print(
+            f"re-armed {rearmed:,} wheels previously marked "
+            "unconvertable/unavailable/unexpected",
+            file=sys.stderr,
+        )
     if args.retry_stale_version:
         rearmed = reset_stale_version(main_db)
         print(f"re-armed {rearmed:,} wheels converted by a different reroll_version", file=sys.stderr)

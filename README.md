@@ -11,7 +11,7 @@ full pipeline; the short version:
 make db-init          # create main.db/pypi.db if missing
 make sync-filenames   # discover + fetch every .whl filename
 make sync-metadata    # download PEP 658 METADATA bodies
-make reroll-convert    # run reroll's translator over every outstanding wheel
+make sync-reroll       # run reroll's translator over every outstanding wheel
 make reroll-status     # coverage %, by category
 ```
 
