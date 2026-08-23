@@ -561,6 +561,52 @@ def wal_monitor(
     return check
 
 
+def truncate_wal(path: Path | str) -> dict:
+    """Checkpoint `<path>-wal` and truncate it back to empty, returning its
+    size (bytes) before and after.
+
+    A plain administrative action, not part of any regular job -- the
+    ordinary write path (`PRAGMA synchronous=NORMAL` plus SQLite's own
+    ~4 MB automatic checkpoint) already keeps `-wal` small on its own; this
+    exists for the rare case `wal_monitor` flags as stuck (see its
+    docstring), so it can be resolved without dropping to a bare `sqlite3`
+    shell. Safe to call even when the file does not exist yet, or is
+    already empty.
+
+    `PRAGMA wal_checkpoint(TRUNCATE)` only truncates if it can checkpoint
+    *every* frame, which itself only happens if no other connection is
+    holding an older snapshot open; if some reader is, the checkpoint stops
+    short and this reports `busy=True` plus whatever size is left, rather
+    than raising -- the caller can retry once whatever is holding it open
+    (e.g. an idle notebook connection) has gone away.
+    """
+    path = Path(path)
+    wal_path = Path(str(path) + "-wal")
+
+    def wal_size() -> int:
+        try:
+            return wal_path.stat().st_size
+        except FileNotFoundError:
+            return 0
+
+    before_bytes = wal_size()
+    db = _connect(path, read_only=False)
+    try:
+        busy, log_frames, checkpointed_frames = db.execute(
+            "PRAGMA wal_checkpoint(TRUNCATE)"
+        ).fetchone()
+    finally:
+        db.close()
+    after_bytes = wal_size()
+    return {
+        "before_bytes": before_bytes,
+        "after_bytes": after_bytes,
+        "busy": bool(busy),
+        "log_frames": log_frames,
+        "checkpointed_frames": checkpointed_frames,
+    }
+
+
 def connect_main(
     data_dir: Path | str = DEFAULT_DATA_DIR, *, read_only: bool = False
 ) -> sqlite3.Connection:

@@ -24,7 +24,7 @@ LIMIT_FLAG  = $(if $(LIMIT),--limit $(LIMIT),)
 REROLL_WORKERS_FLAG = $(if $(REROLL_WORKERS),--workers $(REROLL_WORKERS),)
 
 .PHONY: help status \
-	db-init db2-backfill \
+	db-init db2-backfill truncate-wal \
 	refresh crawl sync-filenames sync-consistency \
 	metadata-status metadata-sync metadata-fetch sync-metadata \
 	sync-reroll reroll-status \
@@ -34,6 +34,7 @@ help:
 	@echo "Targets (override DATA_DIR, RATE, WORKERS, LIMIT as needed):"
 	@echo "  db-init           create main.db/pypi.db (per-database schema, see reroll_data.db2)"
 	@echo "  db2-backfill      one-off: migrate v.db's pypi index/metadata into main.db/pypi.db (resumable)"
+	@echo "  truncate-wal      checkpoint + truncate main.db-wal/pypi.db-wal, reporting before/after sizes"
 	@echo "  sync-filenames    refresh + crawl -- discover and fetch .whl filenames (main.db/pypi.db)"
 	@echo "  sync-consistency  rare: full reconciliation of main.db.wheel against pypi.db.pypi_index"
 	@echo "  sync-metadata     metadata sync + fetch -- download METADATA bodies"
@@ -71,6 +72,15 @@ db-init:
 # interrupt and re-run; each step picks up exactly where it left off.
 db2-backfill:
 	uv run python -m reroll_data.db2_backfill --db $(DB) --data-dir $(DATA_DIR) $(LIMIT_FLAG)
+
+# Administrative, not part of any regular job (see reroll_data.db2.truncate_wal):
+# checkpoints and truncates main.db-wal/pypi.db-wal back to empty, printing
+# each file's size before and after. Safe to run at any time; if another
+# connection (e.g. an idle notebook) is holding an older snapshot open the
+# checkpoint stops short of truncating and this reports that instead of
+# failing -- retry once that connection is closed.
+truncate-wal:
+	$(RUN) db truncate-wal
 
 # --------------------------------------------------------------------------- #
 # filenames: discover every .whl on PyPI, into main.db/pypi.db

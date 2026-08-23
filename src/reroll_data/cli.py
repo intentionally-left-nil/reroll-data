@@ -39,6 +39,29 @@ def cmd_db_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fmt_bytes(n: int) -> str:
+    return f"{n / (1024 * 1024):,.1f} MiB"
+
+
+def cmd_db_truncate_wal(args: argparse.Namespace) -> int:
+    """Checkpoint and truncate `main.db-wal`/`pypi.db-wal`, reporting each
+    file's size before and after (see `_db2.truncate_wal`).
+    """
+    data_dir = Path(args.data_dir)
+    exit_code = 0
+    for filename in (_db2.MAIN_DB_FILENAME, _db2.PYPI_DB_FILENAME):
+        out = _db2.truncate_wal(data_dir / filename)
+        print(
+            f"{filename}-wal: {_fmt_bytes(out['before_bytes'])} -> "
+            f"{_fmt_bytes(out['after_bytes'])}"
+            + (" (busy -- another connection is still holding it open)" if out["busy"] else ""),
+            file=sys.stderr,
+        )
+        if out["busy"]:
+            exit_code = 1
+    return exit_code
+
+
 def cmd_refresh(args: argparse.Namespace) -> int:
     """Fetch the root index into `pypi.db`/`main.db` (see `reroll_data.db2`)."""
     pypi_db = _db2.connect_pypi(args.data_dir)
@@ -307,6 +330,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="create main.db and pypi.db if missing (non-destructive)",
     )
     di.set_defaults(func=cmd_db_init)
+
+    dt = dsub.add_parser(
+        "truncate-wal",
+        help=(
+            "checkpoint and truncate main.db-wal/pypi.db-wal, reporting "
+            "before/after sizes"
+        ),
+    )
+    dt.set_defaults(func=cmd_db_truncate_wal)
 
     r = sub.add_parser(
         "refresh",
