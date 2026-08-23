@@ -197,8 +197,8 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 #: Directory both databases live under. Each `connect_*` function appends
 #: its own filename to this.
@@ -804,7 +804,7 @@ def set_meta(db: sqlite3.Connection, key: str, value: str) -> None:
 
 
 def stats_main(db: sqlite3.Connection) -> dict[str, int]:
-    q = lambda sql: db.execute(sql).fetchone()[0]  # noqa: E731
+    q = lambda sql: db.execute(sql).fetchone()[0]
     by_category = dict(
         db.execute("SELECT category, count(*) FROM reroll_errors GROUP BY 1")
     )
@@ -838,7 +838,7 @@ def stats_main(db: sqlite3.Connection) -> dict[str, int]:
 
 
 def stats_pypi(db: sqlite3.Connection) -> dict[str, int]:
-    q = lambda sql: db.execute(sql).fetchone()[0]  # noqa: E731
+    q = lambda sql: db.execute(sql).fetchone()[0]
     by_state = dict(
         db.execute("SELECT state, count(*) FROM wheel_metadata GROUP BY state")
     )
