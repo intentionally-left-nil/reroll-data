@@ -21,7 +21,7 @@ dependencies = [
     # stable enough now that this repo tracks its released versions instead of
     # an in-progress ../reroll working tree. Bump this alongside a
     # `uv lock --upgrade-package py-reroll` when a new release is needed.
-    "py-reroll>=0.4.0",
+    "py-reroll>=0.5.0",
 ]
 
 [project.scripts]

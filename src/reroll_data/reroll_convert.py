@@ -27,8 +27,18 @@ The new mapper: a curated static table, ahead of reroll's own chain
 `reroll.default_mappers.default_mappers()` (grayskull, conda-lock, the
 hand-maintained overrides table, parselmouth, aggregated, with a passthrough
 fallback) is still used -- but only as the *second* half of a chain built
-fresh per worker process by :func:`_build_mappers`. Ahead of it sits a
-`reroll.static_mapper` built from every `main.db.pypi_conda_names` row with a
+fresh per worker process by :func:`_build_mappers`, and always with
+`use_existing_cache=True`: every worker, in every process this run spawns,
+reads `conda_lock_mapper`'s and `parselmouth_mapper`'s already-warmed
+on-disk cache rather than making its own network call, so the whole run
+resolves names against one consistent snapshot regardless of how many
+processes or when each one happens to run. That cache is warmed by
+`reroll_data.refresh_names.refresh` (`use_existing_cache=False`, run on its
+own schedule, ahead of this job) -- see its module docstring's "Priming the
+on-disk cache" section; `_build_mappers` propagates
+`reroll.errors.MissingCacheError` uncaught if `refresh_names.refresh` has
+never actually run. Ahead of the default chain sits a `reroll.static_mapper`
+built from every `main.db.pypi_conda_names` row with a
 non-NULL `conda_name` -- i.e. a name a human has actually curated, not a
 mapper's live guess. A hit there ends the chain immediately, exactly like any
 other `static_mapper`; a miss (no row, or a row with `conda_name IS NULL` --
@@ -248,6 +258,22 @@ def _build_mappers(main_db: sqlite3.Connection) -> NameMappers:
     defers to `default_mappers()` rather than being mistaken for "checked,
     no mapping" by `reroll.static_mapper` (which cannot tell "no row" from
     "row present but NULL" apart -- both look like a dict miss).
+
+    `default_mappers(use_existing_cache=True)`: this worker process must
+    never make its own network call to warm `conda_lock_mapper`'s or
+    `parselmouth_mapper`'s on-disk cache -- `reroll_data.refresh_names.refresh`
+    is the one job that fetches live upstream data and warms that cache
+    (see its module docstring's "Priming the on-disk cache" section); every
+    `reroll_convert` worker, across every process this run spawns, must
+    instead read that already-warmed cache so the whole run resolves names
+    against one consistent snapshot, not whatever each worker happened to
+    fetch at its own random moment. Raises `reroll.errors.MissingCacheError`
+    (propagated, uncaught) if `refresh_names.refresh` has never run -- there
+    is nothing to fall back to, since fetching live data here would defeat
+    the whole point of pinning every worker to the same snapshot.
+
+    The returned chain is not yet open -- `_init_worker` calls `.open()` on
+    every mapper before `_convert_one` ever uses it.
     """
     table = dict(
         main_db.execute(
@@ -255,7 +281,7 @@ def _build_mappers(main_db: sqlite3.Connection) -> NameMappers:
         )
     )
     pypi_conda_names_mapper = static_mapper(table, mapper_name=STATIC_MAPPER_NAME)
-    return (pypi_conda_names_mapper, *default_mappers())
+    return (pypi_conda_names_mapper, *default_mappers(use_existing_cache=True))
 
 
 def _init_worker(data_dir: str, allow_pre: bool) -> None:
@@ -268,6 +294,15 @@ def _init_worker(data_dir: str, allow_pre: bool) -> None:
     writes to `main.db` itself; see `convert`'s `flush` for why every write
     (including a rejected wheel's `pypi_conda_names` seed rows) funnels
     through the single writer connection in the main process instead.
+
+    Calls `.open()` on every mapper in the chain `_build_mappers` returns --
+    since py-reroll 0.5.0, `reroll.stages.get_wheel_records` only opens/closes
+    a mapper chain it builds for itself, never one passed in explicitly the
+    way `_convert_one` always does (see `_convert_with_prerelease_retry`), so
+    this worker owns that lifecycle instead. No matching `.close()` runs at
+    worker-process exit: a `ProcessPoolExecutor` worker has no teardown hook
+    to run one from, so this mirrors how `_PYPI_DB`'s sqlite connection is
+    already left for process death to reclaim rather than explicitly closed.
     """
     global _PYPI_DB, _MAPPERS, _ALLOW_PRE
     _PYPI_DB = _db2.connect_pypi(data_dir, read_only=True)
@@ -276,6 +311,8 @@ def _init_worker(data_dir: str, allow_pre: bool) -> None:
         _MAPPERS = _build_mappers(main_db)
     finally:
         main_db.close()
+    for mapper in _MAPPERS:
+        mapper.open()
     _ALLOW_PRE = allow_pre
     logging.getLogger("reroll").setLevel(logging.ERROR)
 

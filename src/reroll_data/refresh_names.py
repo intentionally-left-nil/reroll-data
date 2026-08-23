@@ -37,6 +37,23 @@ is the only piece of the default chain this reasoning actually applies to,
 but building once covers every mapper in the chain uniformly rather than
 special-casing one.
 
+Priming the on-disk cache for `reroll_convert`'s workers
+---------------------------------------------------------
+Since py-reroll 0.5.0, every `reroll.name_mapping.NameMapper` must have
+`.open()` called on it before `.map()`/`map_name()` will accept it, and
+`.close()` once done. `refresh` calls `.open()` on the whole chain
+`build_mappers()` returns (`use_existing_cache=False`, i.e. a real network
+fetch through `conda_lock_mapper`/`parselmouth_mapper`) immediately before
+`refresh_names`'s loop, and `.close()` in a `finally` right after -- exactly
+once per run, mirroring "One mapper build for the whole run" above. Because
+`conda_lock_mapper` and `parselmouth_mapper` write their fetched data to a
+shared on-disk cache as a side effect of `.open()`, this run is what lets
+`reroll_convert._init_worker`'s `default_mappers(use_existing_cache=True)`
+chain find that cache already warm instead of raising `MissingCacheError`
+-- reinforcing why this job is deliberately run on its own schedule (e.g.
+weekly), ahead of any `reroll_convert.convert` run, rather than folded into
+it.
+
 Concurrency
 -----------
 After construction, every mapper in the chain resolves to a plain,
@@ -112,6 +129,17 @@ def build_mappers() -> NameMappers:
 
     See the module docstring's "One mapper build for the whole run"
     section for why this must not be called more than once per run.
+
+    `use_existing_cache` is deliberately left at its default (`False`):
+    this is the one place in `reroll_data` that is *meant* to hit the
+    network and see live upstream data -- `conda_lock_mapper`'s and
+    `parselmouth_mapper`'s on-disk caches get warmed as a side effect of
+    `refresh`'s own `.open()` call on the chain this returns, which is
+    exactly what lets `reroll_convert._init_worker`'s
+    `default_mappers(use_existing_cache=True)` find a cache to read
+    afterward instead of raising `MissingCacheError`. The caller (`refresh`)
+    owns this chain's `.open()`/`.close()` lifecycle -- see its own
+    docstring.
     """
     return default_mappers()
 
@@ -334,16 +362,31 @@ def refresh(
     )
     mappers = build_mappers()
 
-    print("refreshing pypi_conda_names ...", file=sys.stderr)
-    names_stats, changed = refresh_names(
-        main_db,
-        mappers,
-        read_batch=read_batch,
-        write_batch=write_batch,
-        limit=limit,
-        progress_every=progress_every,
-        check_wal=check_wal,
-    )
+    # `.open()` here is also what warms `conda_lock_mapper`'s and
+    # `parselmouth_mapper`'s on-disk caches with live upstream data (this
+    # chain is built with `use_existing_cache=False`, i.e. a real network
+    # fetch) -- the priming step `reroll_convert._init_worker`'s
+    # `default_mappers(use_existing_cache=True)` chain depends on to find a
+    # cache already there instead of raising `MissingCacheError`. `.close()`
+    # always runs, even on error, so a failed or interrupted refresh never
+    # leaves a mapper's resources (an open sqlite connection, ...) dangling.
+    print("opening reroll's default mapper chain ...", file=sys.stderr)
+    for mapper in mappers:
+        mapper.open()
+    try:
+        print("refreshing pypi_conda_names ...", file=sys.stderr)
+        names_stats, changed = refresh_names(
+            main_db,
+            mappers,
+            read_batch=read_batch,
+            write_batch=write_batch,
+            limit=limit,
+            progress_every=progress_every,
+            check_wal=check_wal,
+        )
+    finally:
+        for mapper in mappers:
+            mapper.close()
     print("pypi_conda_names refresh finished:", file=sys.stderr)
     for key, value in names_stats.items():
         print(f"  {key:<16} {value}", file=sys.stderr)

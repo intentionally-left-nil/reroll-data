@@ -785,7 +785,7 @@ wheels = [
 
 [[package]]
 name = "py-reroll"
-version = "0.4.0"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "conda-lock" },
@@ -795,9 +795,9 @@ dependencies = [
     { name = "py-rattler" },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/23/1f/46dea5a1758fb138e2425c87e7bbe6eee63e6596ad7958e15e8e4ab4cd26/py_reroll-0.4.0.tar.gz", hash = "sha256:20a10406ed7608a166cd58f38bd0b2826f3d64e8abf214c70ed829a450be6de9", size = 68509, upload-time = "2026-08-20T07:23:37.07Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/46/42/67e8adb3a26ae0628069857b1ced7d3a467f42cf399f24bd47b0d274f7d5/py_reroll-0.5.0.tar.gz", hash = "sha256:c747f32504b15bd3875bafb71afa7eb1c18acc90e4e352995550cc5b485045ef", size = 73030, upload-time = "2026-08-23T06:57:14.284Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7b/d5/b88bad7227b97e8dc1f9d7548e2c90bd4a79f4cad5b62904acc462865bd2/py_reroll-0.4.0-py3-none-any.whl", hash = "sha256:3afcfad288bf764d67651991975b73c5a7e6fe2d18db18f8ce2d7656dfd55b21", size = 92616, upload-time = "2026-08-20T07:23:35.763Z" },
+    { url = "https://files.pythonhosted.org/packages/30/8a/8f449c1ac3cab88ab6927c7b7e606182e3786389a06eb33daa82cd7411be/py_reroll-0.5.0-py3-none-any.whl", hash = "sha256:222f3d243c06d3bf112281d3d68f5293f8c5e4ee8d0a36f3ebc23c4710b9ebe0", size = 97348, upload-time = "2026-08-23T06:57:13.162Z" },
 ]
 
 [[package]]
@@ -1054,7 +1054,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "py-reroll", specifier = ">=0.4.0" },
+    { name = "py-reroll", specifier = ">=0.5.0" },
     { name = "pypi-simple", specifier = ">=1.8" },
     { name = "requests", specifier = ">=2.32" },
     { name = "urllib3", specifier = ">=2.0" },
