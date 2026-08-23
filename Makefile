@@ -27,7 +27,8 @@ REROLL_WORKERS_FLAG = $(if $(REROLL_WORKERS),--workers $(REROLL_WORKERS),)
 	db-init db2-backfill \
 	refresh crawl sync-filenames sync-consistency \
 	metadata-status metadata-sync metadata-fetch sync-metadata \
-	reroll-convert reroll-status
+	reroll-convert reroll-status \
+	refresh-mapping
 
 help:
 	@echo "Targets (override DATA_DIR, RATE, WORKERS, LIMIT as needed):"
@@ -37,6 +38,7 @@ help:
 	@echo "  sync-consistency  rare: full reconciliation of main.db.wheel against pypi.db.pypi_index"
 	@echo "  sync-metadata     metadata sync + fetch -- download METADATA bodies"
 	@echo "  reroll-convert    run reroll's own translator over every outstanding main.db.wheel row, always retrying past errors + stale reroll_version (ordinary uv env)"
+	@echo "  refresh-mapping   re-run reroll's mapper chain over pypi_conda_names, re-arming any affected wheel"
 	@echo "  status            counts for the wheel/project crawl (pypi.db)"
 	@echo "  metadata-status   counts for the metadata download"
 	@echo "  reroll-status     reroll's own conversion counts by error category, + coverage %"
@@ -142,3 +144,16 @@ sync-metadata:
 # actually need it.
 reroll-convert:
 	$(RUN) convert --retry-errors --retry-stale-version $(REROLL_WORKERS_FLAG) $(LIMIT_FLAG)
+
+# --------------------------------------------------------------------------- #
+# names: curate main.db.pypi_conda_names (see reroll_data.refresh_names)
+# --------------------------------------------------------------------------- #
+
+# Re-runs reroll's default mapper chain (built once for the whole run) over
+# every pypi_conda_names row, replacing conda_name in place wherever it
+# disagrees, then re-arms any main.db.wheel row whose resolutions used a
+# name that changed. Idempotent but not incremental -- every run re-checks
+# the whole table. Run on its own schedule (e.g. weekly), then
+# `make reroll-convert` to pick up whatever this re-armed.
+refresh-mapping:
+	$(RUN) names refresh $(LIMIT_FLAG)

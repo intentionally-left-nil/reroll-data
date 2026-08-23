@@ -10,6 +10,7 @@ from pathlib import Path
 from . import crawl as _crawl
 from . import db2 as _db2
 from . import metadata as _metadata
+from . import refresh_names as _refresh_names
 from . import reroll_convert as _reroll_convert
 
 
@@ -250,6 +251,18 @@ def cmd_convert(args: argparse.Namespace) -> int:
     return 1 if out.get("interrupted") else 0
 
 
+def cmd_names_refresh(args: argparse.Namespace) -> int:
+    """Refresh `main.db.pypi_conda_names` against reroll's default mapper
+    chain, then re-arm any `main.db.wheel` row it affects. See
+    `reroll_data.refresh_names`.
+    """
+    out = _refresh_names.refresh(args.data_dir, limit=args.limit)
+    print("names refresh finished:", file=sys.stderr)
+    for key, value in out.items():
+        print(f"  {key:<16} {value}", file=sys.stderr)
+    return 1 if out.get("interrupted") else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="reroll-data",
@@ -438,6 +451,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="rows committed per write transaction (default: %(default)s)",
     )
     cv.set_defaults(func=cmd_convert)
+
+    n = sub.add_parser(
+        "names",
+        help="curate main.db.pypi_conda_names against reroll's own mapper chain",
+    )
+    nsub = n.add_subparsers(dest="names_command", required=True)
+
+    nr = nsub.add_parser(
+        "refresh",
+        help=(
+            "re-run reroll's default mapper chain over every "
+            "pypi_conda_names row, overwriting conda_name in place wherever "
+            "it disagrees, then re-arm any main.db.wheel row it affects"
+        ),
+    )
+    nr.add_argument(
+        "--limit", type=int, default=None, help="only check N pypi_conda_names rows"
+    )
+    nr.set_defaults(func=cmd_names_refresh)
 
     return p
 
