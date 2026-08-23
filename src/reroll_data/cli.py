@@ -13,7 +13,6 @@ from . import crawl as _crawl
 from . import db as _db
 from . import db2 as _db2
 from . import metadata as _metadata
-from . import repodata_convert as _repodata_convert
 from . import repodata_sync as _repodata_sync
 from . import reroll_convert as _reroll_convert
 from . import retry_metadata_conversion as _retry_metadata_conversion
@@ -265,38 +264,6 @@ def cmd_reroll_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_repodata_convert(args: argparse.Namespace) -> int:
-    db = _db.connect(args.db)
-    _db.init(db)
-    tracked = db.execute(
-        "SELECT count(*) FROM repodata_conversion WHERE conda_pypi_compatible = 1"
-    ).fetchone()[0]
-    if tracked == 0:
-        db.close()
-        print(
-            "nothing conda-pypi-compatible tracked yet -- run "
-            "`reroll-data repodata sync` first.",
-            file=sys.stderr,
-        )
-        return 2
-    if args.retry_errors:
-        rearmed = _repodata_convert.reset_errors(db)
-        print(f"re-armed {rearmed:,} previously-failed wheels", file=sys.stderr)
-    db.close()
-
-    out = _repodata_convert.convert(
-        Path(args.db),
-        workers=args.workers,
-        limit=args.limit,
-        read_batch=args.read_batch,
-        chunksize=args.chunksize,
-        write_batch=args.write_batch,
-    )
-    print("convert finished:", file=sys.stderr)
-    print(_fmt(out), file=sys.stderr)
-    return 1 if out.get("interrupted") else 0
-
-
 def cmd_convert(args: argparse.Namespace) -> int:
     """Run reroll's own translator over every outstanding `main.db.wheel`
     row -- the `main.db`/`pypi.db` (db2) replacement for the old,
@@ -537,7 +504,11 @@ def build_parser() -> argparse.ArgumentParser:
     e.set_defaults(func=cmd_export)
 
     rp = sub.add_parser(
-        "repodata", help="compare reroll's vs conda-pypi's repodata conversion"
+        "repodata",
+        help=(
+            "repodata_conversion bookkeeping -- legacy v.db table, kept for "
+            "reroll's own historical conversion stats (see reroll-status)"
+        ),
     )
     rpsub = rp.add_subparsers(dest="repodata_command", required=True)
 
@@ -559,46 +530,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     rrs.set_defaults(func=cmd_reroll_status)
-
-    rpc = rpsub.add_parser(
-        "convert",
-        help=(
-            "run conda-pypi's translator over compatible wheels -- must run "
-            "inside conda-pypi's own pixi env, see `make repodata-convert` "
-            "(idempotent, resumable)"
-        ),
-    )
-    rpc.add_argument(
-        "--workers",
-        type=int,
-        default=None,
-        help="worker processes (default: all cores, via os.process_cpu_count())",
-    )
-    rpc.add_argument("--limit", type=int, default=None, help="only convert N wheels")
-    rpc.add_argument(
-        "--retry-errors",
-        action="store_true",
-        help="also re-attempt wheels previously marked conda_pypi_error",
-    )
-    rpc.add_argument(
-        "--read-batch",
-        type=int,
-        default=_repodata_convert.READ_BATCH,
-        help="rows read per round trip (default: %(default)s)",
-    )
-    rpc.add_argument(
-        "--chunksize",
-        type=int,
-        default=_repodata_convert.CHUNKSIZE,
-        help="wheels handed to a worker process per task (default: %(default)s)",
-    )
-    rpc.add_argument(
-        "--write-batch",
-        type=int,
-        default=_repodata_convert.WRITE_BATCH,
-        help="rows committed per write transaction (default: %(default)s)",
-    )
-    rpc.set_defaults(func=cmd_repodata_convert)
 
     cv = sub.add_parser(
         "convert",

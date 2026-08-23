@@ -1,13 +1,18 @@
 """Idempotent sync of `wheel` -> `repodata_conversion`.
 
-`repodata_conversion` is where reroll's own repodata translator and upstream
-conda-pypi (see :mod:`reroll_data.conda_pypi_index_demo`) get compared, one row per
-wheel. This module only does the bookkeeping *around* that comparison -- it
-never itself runs either converter:
+`repodata_conversion` is a legacy `v.db` table originally used to compare
+reroll's own repodata translator against upstream conda-pypi's, one row per
+wheel. The conda-pypi side of that comparison (the job that actually ran
+conda-pypi's translator, plus the pixi environment it needed) has since been
+removed -- see git history if it is ever worth reviving. This module only
+does bookkeeping *around* that former comparison -- it never itself runs a
+converter:
 
 - ensures every wheel has a row here;
 - computes `conda_pypi_compatible` for each newly-inserted row, purely from
-  its filename (see :func:`is_conda_pypi_compatible`);
+  its filename (see :func:`is_conda_pypi_compatible`) -- historical/inert
+  now that nothing consumes it, but kept as-is rather than changed, since
+  the column is `NOT NULL` and existing rows already carry a value;
 - leaves `reroll_compatible` and both `_data`/`_error` pairs NULL. Those are
   for whatever job actually runs each converter to fill in later, mirroring
   how `wheel_metadata.sync` only ever sets `state`/`blob_sha256` and leaves

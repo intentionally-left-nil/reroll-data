@@ -7,9 +7,10 @@ Only the *pypi index* and *fetched metadata* halves of ``v.db`` move. Per the
 migration's own brief:
 
 * ``repodata_conversion`` (reroll's own conversion attempt, and the
-  conda-pypi comparison) is **not** copied at all -- there is no equivalent
-  table in :mod:`reroll_data.db2`'s schema. This is "reroll data"/"error
-  data" and stays behind in ``v.db``.
+  legacy reroll-vs-conda-pypi comparison; the conda-pypi side of that
+  comparison has since been removed entirely) is **not** copied at all --
+  there is no equivalent table in :mod:`reroll_data.db2`'s schema. This is
+  "reroll data"/"error data" and stays behind in ``v.db``.
 * ``metadata_blob.parsed_json`` (reroll's parse of a stored METADATA body,
   see :mod:`reroll_data.backfill`) is **not** copied -- also a product of the
   reroll conversion step. Every migrated row's ``parsed_json`` is left NULL;

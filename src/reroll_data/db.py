@@ -165,6 +165,15 @@ CREATE INDEX IF NOT EXISTS wheel_metadata_lease
 -- ------------------------------------------------------------------------- --
 -- Repodata conversion comparison: reroll's own translator vs upstream
 -- conda-pypi, run over every wheel. See :mod:`reroll_data.repodata_sync`.
+--
+-- The conda-pypi side of this comparison (the code that actually ran
+-- conda-pypi's translator and populated conda_pypi_data/conda_pypi_error,
+-- plus the pixi environment that required) has since been removed -- see
+-- git history if it is ever worth reviving. The columns and historical data
+-- below are left in place untouched (never dropped/altered);
+-- `conda_pypi_compatible` is still computed by `repodata_sync.sync()` for
+-- every row purely as filename-derived bookkeeping, even though nothing
+-- currently consumes it.
 -- ------------------------------------------------------------------------- --
 
 -- One row per wheel. `repodata_sync.sync()` is the only writer that inserts
@@ -182,15 +191,17 @@ CREATE TABLE IF NOT EXISTS repodata_conversion (
     -- Error message from reroll's attempt (type + message), or NULL if it
     -- succeeded or has not been attempted yet.
     reroll_error          TEXT,
-    -- JSON text of the repodata["v3"]["whl"] entry conda-pypi produced (see
-    -- reroll_data.conda_pypi_index_demo), or NULL if not yet attempted / errored.
+    -- JSON text of the repodata["v3"]["whl"] entry conda-pypi produced.
+    -- Historical: the job that populated this has been removed; existing
+    -- values are left as-is and no new rows will ever get one.
     conda_pypi_data       TEXT,
     conda_pypi_error      TEXT,
     -- 0/1, computed purely from the filename's (interpreter, abi, platform)
     -- tag triple: interpreter GLOB 'py3*', abi = 'none', platform = 'any' --
     -- see reroll_data.repodata_sync.is_conda_pypi_compatible. Set for every
-    -- row by sync(); never NULL once synced, regardless of whether the
-    -- conda-pypi conversion itself has run yet.
+    -- row by sync(); never NULL once synced. No longer acted upon by
+    -- anything (the conda-pypi conversion job that used to consume it has
+    -- been removed) -- kept purely as historical/filename-derived bookkeeping.
     conda_pypi_compatible INTEGER NOT NULL,
     -- 0/1/NULL. Unknown ("NULL") until a separate probe run against reroll
     -- decides it -- sync() always inserts NULL here and never overwrites it.
@@ -199,13 +210,11 @@ CREATE TABLE IF NOT EXISTS repodata_conversion (
     PRIMARY KEY (project, filename)
 ) WITHOUT ROWID;
 
--- Partial index over just the conda-pypi work still outstanding, so
--- `repodata_convert.convert()`'s claim scan stays a seek once most rows have
--- a conda_pypi_data or conda_pypi_error. Two IS NULL terms ANDed together are
--- exactly the query's own WHERE clause (see `repodata_convert`), which is the
--- straightforward conjunctive case SQLite's partial-index prover handles --
--- unlike the IN/<> forms noted in `wheel_metadata_todo` above, which it does
--- not. `conda_pypi_compatible` is the indexed column so `= 1` inside that
+-- Partial index over just the conda-pypi work still outstanding. Historical:
+-- the job that used to consume this (`repodata_convert.convert()`) has been
+-- removed, so this index no longer serves an active claim scan, but it is
+-- left in place rather than dropped -- see the table comment above.
+-- `conda_pypi_compatible` is the indexed column so `= 1` inside that
 -- narrowed set is a cheap seek rather than a second scan.
 CREATE INDEX IF NOT EXISTS repodata_conversion_todo
     ON repodata_conversion(conda_pypi_compatible)
@@ -399,7 +408,12 @@ def metadata_stats(
 
 
 def repodata_conversion_stats(db: sqlite3.Connection) -> dict[str, int]:
-    """Counts for the reroll-vs-conda-pypi repodata comparison.
+    """Counts for the legacy `repodata_conversion` table.
+
+    `conda_pypi_*` keys are historical: the job that populated them has been
+    removed (see the table's comment in `SCHEMA`), so these counts stop
+    growing but are kept for reference. `reroll_*` keys reflect reroll's own
+    (also legacy, `v.db`-based) conversion attempt.
 
     Not folded into :func:`stats` for the same reason as :func:`metadata_stats`
     -- this is its own full scan of a many-million-row table, so callers only
