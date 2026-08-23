@@ -785,8 +785,8 @@ wheels = [
 
 [[package]]
 name = "py-reroll"
-version = "0.3.1"
-source = { editable = "../reroll" }
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "conda-lock" },
     { name = "grayskull" },
@@ -795,24 +795,9 @@ dependencies = [
     { name = "py-rattler" },
     { name = "pydantic" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "conda-lock", specifier = ">=4.0.2" },
-    { name = "grayskull", specifier = ">=3.1.1" },
-    { name = "markerpry", specifier = ">=0.5.1" },
-    { name = "packaging", specifier = ">=26.1" },
-    { name = "py-rattler", specifier = ">=0.25.0" },
-    { name = "pydantic", specifier = ">=2.13.4" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "frozendict", specifier = ">=2.4" },
-    { name = "pytest", specifier = ">=8.3" },
-    { name = "pytest-cov", specifier = ">=6.0" },
-    { name = "ruff", specifier = ">=0.8" },
-    { name = "ty", specifier = ">=0.0.1a1" },
+sdist = { url = "https://files.pythonhosted.org/packages/46/42/67e8adb3a26ae0628069857b1ced7d3a467f42cf399f24bd47b0d274f7d5/py_reroll-0.5.0.tar.gz", hash = "sha256:c747f32504b15bd3875bafb71afa7eb1c18acc90e4e352995550cc5b485045ef", size = 73030, upload-time = "2026-08-23T06:57:14.284Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/30/8a/8f449c1ac3cab88ab6927c7b7e606182e3786389a06eb33daa82cd7411be/py_reroll-0.5.0-py3-none-any.whl", hash = "sha256:222f3d243c06d3bf112281d3d68f5293f8c5e4ee8d0a36f3ebc23c4710b9ebe0", size = 97348, upload-time = "2026-08-23T06:57:13.162Z" },
 ]
 
 [[package]]
@@ -1061,25 +1046,19 @@ name = "reroll-data"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "py-reroll" },
     { name = "pypi-simple" },
     { name = "requests" },
     { name = "urllib3" },
 ]
 
-[package.dev-dependencies]
-probe = [
-    { name = "py-reroll" },
-]
-
 [package.metadata]
 requires-dist = [
+    { name = "py-reroll", specifier = ">=0.5.0" },
     { name = "pypi-simple", specifier = ">=1.8" },
     { name = "requests", specifier = ">=2.32" },
     { name = "urllib3", specifier = ">=2.0" },
 ]
-
-[package.metadata.requires-dev]
-probe = [{ name = "py-reroll", editable = "../reroll" }]
 
 [[package]]
 name = "ruamel-yaml"
