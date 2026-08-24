@@ -13,15 +13,7 @@ dependencies = [
     # pypi-simple, so declared here instead of relied on transitively.
     "requests>=2.32",
     "urllib3>=2.0",
-    # The thing under test, and now a required dependency (not gated behind an
-    # optional group) -- reroll_data.metadata/reroll_convert both import it
-    # unconditionally. Pinned to
-    # the published PyPI release (distribution name `py-reroll`; the importable
-    # module stays `reroll`) rather than a local editable checkout -- reroll is
-    # stable enough now that this repo tracks its released versions instead of
-    # an in-progress ../reroll working tree. Bump this alongside a
-    # `uv lock --upgrade-package py-reroll` when a new release is needed.
-    "py-reroll>=0.5.0",
+    "py-reroll>=0.5.1",
 ]
 
 [project.scripts]
@@ -30,4 +22,3 @@ reroll-data = "reroll_data.cli:main"
 [build-system]
 requires = ["uv_build>=0.12.0,<0.13.0"]
 build-backend = "uv_build"
-
