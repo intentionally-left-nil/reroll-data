@@ -374,7 +374,7 @@ def _init_worker(data_dir: str, allow_pre: bool) -> None:
 # wants text, not the raw JSONB encoding.
 _METADATA_SELECT = """
 SELECT wm.state, wm.blob_sha256, p.pypi_metadata ->> 'url',
-       p.pypi_metadata ->> 'size', p.pypi_metadata ->> 'sha256',
+       p.pypi_metadata ->> 'size', p.pypi_metadata -> 'hashes' ->> 'sha256',
        m.z_body, m.codec, json(m.parsed_json)
   FROM wheel_metadata AS wm
   JOIN pypi_index AS p ON p.filename = wm.filename
